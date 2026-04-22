@@ -144,6 +144,7 @@ bool IslandBuffer::allocatePCG(VulkanContext& vk) {
     ok &= vk.allocBuffer(f32n,           STORAGE, &pcg_z_buf,         &pcg_z_mem);
     ok &= vk.allocBuffer(f32n,           STORAGE, &pcg_p_buf,         &pcg_p_mem);
     ok &= vk.allocBuffer(f32n,           STORAGE, &pcg_ap_buf,        &pcg_ap_mem);
+    ok &= vk.allocBuffer(f32n,           STORAGE, &pcg_inv_diag_buf,  &pcg_inv_diag_mem);
     ok &= vk.allocBuffer(partialBytes,   STORAGE, &pcg_partial_buf,   &pcg_partial_mem);
     // Reduction buffer needs TRANSFER_SRC|DST for the rTz rotation copy
     // (reductionBuf[2] → reductionBuf[0]) between PCG iterations.
@@ -1113,6 +1114,7 @@ void IslandBuffer::free(VulkanContext& vk) {
     freeOne(pcg_z_buf,         pcg_z_mem);
     freeOne(pcg_p_buf,         pcg_p_mem);
     freeOne(pcg_ap_buf,        pcg_ap_mem);
+    freeOne(pcg_inv_diag_buf,  pcg_inv_diag_mem);
     freeOne(pcg_partial_buf,   pcg_partial_mem);
     freeOne(pcg_reduction_buf, pcg_reduction_mem);
     freeOne(amg_aggregation_buf, amg_aggregation_mem);

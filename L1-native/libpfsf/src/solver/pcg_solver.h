@@ -30,6 +30,13 @@ namespace pfsf {
 class VulkanContext;
 struct IslandBuffer;
 
+/** Matches the GLSL PushConstants in pcg_precompute.comp.glsl. */
+struct PCGPrecomputePushConstants {
+    std::uint32_t Lx, Ly, Lz;
+};
+static_assert(sizeof(PCGPrecomputePushConstants) == 12,
+              "PCGPrecomputePushConstants must be 12 bytes to match pcg_precompute.comp.glsl");
+
 /** Matches the GLSL PushConstants in pcg_matvec.comp.glsl. */
 struct PCGMatvecPushConstants {
     std::uint32_t Lx, Ly, Lz;
@@ -107,16 +114,19 @@ public:
     VkDescriptorSetLayout updateLayout()    const { return update_.set_layout;    }
     VkDescriptorSetLayout directionLayout() const { return direction_.set_layout; }
     VkDescriptorSetLayout dotLayout()       const { return dot_.set_layout;       }
+    VkDescriptorSetLayout precomputeLayout() const { return precompute_.set_layout; }
 
     VkPipeline matvecPipeline()    const { return matvec_.pipeline;    }
     VkPipeline updatePipeline()    const { return update_.pipeline;    }
     VkPipeline directionPipeline() const { return direction_.pipeline; }
     VkPipeline dotPipeline()       const { return dot_.pipeline;       }
+    VkPipeline precomputePipeline() const { return precompute_.pipeline; }
 
     VkPipelineLayout matvecPipelineLayout()    const { return matvec_.pipeline_layout;    }
     VkPipelineLayout updatePipelineLayout()    const { return update_.pipeline_layout;    }
     VkPipelineLayout directionPipelineLayout() const { return direction_.pipeline_layout; }
     VkPipelineLayout dotPipelineLayout()       const { return dot_.pipeline_layout;       }
+    VkPipelineLayout precomputePipelineLayout() const { return precompute_.pipeline_layout; }
 
     VkDescriptorSetLayout amgRestrictLayout()      const { return amg_restrict_.set_layout;      }
     VkDescriptorSetLayout amgCoarseJacobiLayout()  const { return amg_coarse_jacobi_.set_layout; }
@@ -136,6 +146,7 @@ private:
     br_core::ComputePipeline  update_{};
     br_core::ComputePipeline  direction_{};
     br_core::ComputePipeline  dot_{};
+    br_core::ComputePipeline  precompute_{};
     br_core::ComputePipeline  amg_restrict_{};
     br_core::ComputePipeline  amg_coarse_jacobi_{};
     br_core::ComputePipeline  amg_prolong_{};

@@ -103,6 +103,9 @@ public final class PFSFPCGRecorder {
             VulkanComputeContext.computeBarrier(cmdBuf);
         }
 
+        // Step 1.5: Precompute inverse diagonals
+        recordPrecompute(cmdBuf, buf, descriptorPool);
+
         // Step 2: r = source - Ap, z = M⁻¹r (Jacobi), p = z, compute r·z partial sums
         try (MemoryStack stack = MemoryStack.stackPush()) {
             vkCmdBindPipeline(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, pcgUpdatePipeline);
@@ -124,6 +127,8 @@ public final class PFSFPCGRecorder {
             VulkanComputeContext.bindBufferToDescriptor(ds, 7, buf.getPcgReductionBuf(), 0, PCG_REDUCTION_SLOTS * Float.BYTES);
             // v2: binding 8 — conductivity for Jacobi preconditioner diagonal
             VulkanComputeContext.bindBufferToDescriptor(ds, 8, buf.getConductivityBuf(), buf.getConductivityOffset(), buf.getConductivitySize());
+            // v3: binding 9 — precomputed inverse diagonal
+            VulkanComputeContext.bindBufferToDescriptor(ds, 9, buf.getPcgInvDiagBuf(), 0, buf.getPhiSize());
 
             vkCmdBindDescriptorSets(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE,
                     pcgUpdatePipelineLayout, 0, stack.longs(ds), null);
@@ -189,6 +194,9 @@ public final class PFSFPCGRecorder {
             VulkanComputeContext.computeBarrier(cmdBuf);
         }
 
+        // ─── Dispatch 1.5: Precompute inverse diagonals ───
+        recordPrecompute(cmdBuf, buf, descriptorPool);
+
         // ─── Dispatch 2: Compute pAp dot product (p · Ap) ───
         // Use a dedicated dot product shader pass: partial sums of p[i]*Ap[i]
         recordDotProduct(cmdBuf, buf, buf.getPcgPBuf(), buf.getPcgApBuf(),
@@ -220,6 +228,8 @@ public final class PFSFPCGRecorder {
             VulkanComputeContext.bindBufferToDescriptor(ds, 7, buf.getPcgReductionBuf(), 0, PCG_REDUCTION_SLOTS * Float.BYTES);
             // v2: binding 8 — conductivity for Jacobi preconditioner
             VulkanComputeContext.bindBufferToDescriptor(ds, 8, buf.getConductivityBuf(), buf.getConductivityOffset(), buf.getConductivitySize());
+            // v3: binding 9 — precomputed inverse diagonal
+            VulkanComputeContext.bindBufferToDescriptor(ds, 9, buf.getPcgInvDiagBuf(), 0, buf.getPhiSize());
 
             vkCmdBindDescriptorSets(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE,
                     pcgUpdatePipelineLayout, 0, stack.longs(ds), null);
@@ -289,10 +299,24 @@ public final class PFSFPCGRecorder {
 
     // ─── Dot product helpers (two-pass GPU reduction) ───
 
-    /**
-     * 計算兩個向量的內積局部和（Pass 1）。
-     * 每個 workgroup 輸出一個 partial sum 到 partialBuf。
-     */
+    private static void recordPrecompute(VkCommandBuffer cmdBuf, PFSFIslandBuffer buf, long descriptorPool) {
+        int N = buf.getN();
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            vkCmdBindPipeline(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, pcgPrecomputePipeline);
+            long ds = VulkanComputeContext.allocateDescriptorSet(descriptorPool, pcgPrecomputeDSLayout);
+            if (ds == 0) return;
+            VulkanComputeContext.bindBufferToDescriptor(ds, 0, buf.getConductivityBuf(), buf.getConductivityOffset(), buf.getConductivitySize());
+            VulkanComputeContext.bindBufferToDescriptor(ds, 1, buf.getPcgInvDiagBuf(), 0, buf.getPhiSize());
+            vkCmdBindDescriptorSets(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, pcgPrecomputePipelineLayout, 0, stack.longs(ds), null);
+            ByteBuffer pc = stack.malloc(12);
+            pc.putInt(buf.getLx()).putInt(buf.getLy()).putInt(buf.getLz());
+            pc.flip();
+            vkCmdPushConstants(cmdBuf, pcgPrecomputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, pc);
+            vkCmdDispatch(cmdBuf, ceilDiv(N, WG_SCAN), 1, 1);
+            VulkanComputeContext.computeBarrier(cmdBuf);
+        }
+    }
+
     /**
      * 計算兩個向量的內積局部和（Pass 1）：sum(vecA[i] * vecB[i])。
      * 使用專用 pcg_dot.comp.glsl shader（3 bindings: vecA, vecB, partials）。

@@ -33,6 +33,14 @@ std::vector<br_core::PipelineLayoutBinding> updateBindings() {
         { 6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },  // partialSums
         { 7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },  // reductionBuf
         { 8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },  // sigma
+        { 9, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },  // invDiag6 (precomputed inverse diagonal)
+    };
+}
+
+std::vector<br_core::PipelineLayoutBinding> precomputeBindings() {
+    return {
+        { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },  // sigma
+        { 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },  // invDiag6
     };
 }
 
@@ -104,6 +112,10 @@ bool PCGSolver::createPipelines() {
             "compute/pfsf/pcg_dot.comp", dotBindings(),
             { 0, sizeof(PCGDotPushConstants) });
 
+    precompute_ = br_core::build_compute_pipeline(vk_.device(), VK_NULL_HANDLE,
+            "compute/pfsf/pcg_precompute.comp", precomputeBindings(),
+            { 0, sizeof(PCGPrecomputePushConstants) });
+
     amg_restrict_ = br_core::build_compute_pipeline(vk_.device(), VK_NULL_HANDLE,
             "compute/pfsf/amg_scatter_restrict.comp", amgRestrictBindings(),
             { 0, sizeof(AMGFinePushConstants) });
@@ -140,6 +152,7 @@ void PCGSolver::destroyPipelines() {
     br_core::destroy_compute_pipeline(vk_.device(), update_);
     br_core::destroy_compute_pipeline(vk_.device(), direction_);
     br_core::destroy_compute_pipeline(vk_.device(), dot_);
+    br_core::destroy_compute_pipeline(vk_.device(), precompute_);
     br_core::destroy_compute_pipeline(vk_.device(), amg_restrict_);
     br_core::destroy_compute_pipeline(vk_.device(), amg_coarse_jacobi_);
     br_core::destroy_compute_pipeline(vk_.device(), amg_prolong_);

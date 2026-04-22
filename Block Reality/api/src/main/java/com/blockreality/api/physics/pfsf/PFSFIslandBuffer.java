@@ -117,6 +117,7 @@ public class PFSFIslandBuffer {
     private long[] pcgApBuf;
     private long[] pcgPartialBuf;
     private long[] pcgReductionBuf;
+    private long[] pcgInvDiagBuf;
     private boolean pcgAllocated = false;
 
     private final AtomicInteger refCount = new AtomicInteger(1);
@@ -212,6 +213,7 @@ public class PFSFIslandBuffer {
         pcgRBuf  = VulkanComputeContext.allocateDeviceBuffer(floatN, storageUsage);
         pcgPBuf  = VulkanComputeContext.allocateDeviceBuffer(floatN, storageUsage);
         pcgApBuf = VulkanComputeContext.allocateDeviceBuffer(floatN, storageUsage);
+        pcgInvDiagBuf = VulkanComputeContext.allocateDeviceBuffer(floatN, storageUsage);
         int numPartials = (N + 511) / 512;
         pcgPartialBuf = VulkanComputeContext.allocateDeviceBuffer((long) numPartials * Float.BYTES, storageUsage);
         pcgReductionBuf = VulkanComputeContext.allocateDeviceBuffer(16, storageUsage);
@@ -222,6 +224,7 @@ public class PFSFIslandBuffer {
         freeBufferPair(pcgRBuf); pcgRBuf = null;
         freeBufferPair(pcgPBuf); pcgPBuf = null;
         freeBufferPair(pcgApBuf); pcgApBuf = null;
+        freeBufferPair(pcgInvDiagBuf); pcgInvDiagBuf = null;
         freeBufferPair(pcgPartialBuf); pcgPartialBuf = null;
         freeBufferPair(pcgReductionBuf); pcgReductionBuf = null;
         pcgAllocated = false;
@@ -408,6 +411,7 @@ public class PFSFIslandBuffer {
     public long getPcgApBuf() { return pcgApBuf != null ? pcgApBuf[0] : 0; }
     public long getPcgPartialBuf() { return pcgPartialBuf != null ? pcgPartialBuf[0] : 0; }
     public long getPcgReductionBuf() { return pcgReductionBuf != null ? pcgReductionBuf[0] : 0; }
+    public long getPcgInvDiagBuf() { return pcgInvDiagBuf != null ? pcgInvDiagBuf[0] : 0; }
 
     public long getHFieldBuf() { return phaseField.getHFieldBuf(); }
     public long getDFieldBuf() { return phaseField.getDFieldBuf(); }

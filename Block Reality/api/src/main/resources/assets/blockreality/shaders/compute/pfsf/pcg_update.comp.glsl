@@ -46,7 +46,7 @@ layout(set = 0, binding = 4) readonly buffer Source { float source[];  };
 layout(set = 0, binding = 5) readonly buffer Type   { uint  vtype[];   };
 layout(set = 0, binding = 6) buffer PartialSums { float partialSums[]; };
 layout(set = 0, binding = 7) readonly buffer Reduction { float reductionBuf[]; };
-layout(set = 0, binding = 8) readonly buffer Cond { float sigma[]; };
+layout(set = 0, binding = 8) readonly buffer Cond { float sigma[]; };\nlayout(set = 0, binding = 9) readonly buffer InvDiag { float invDiag6[]; };
 
 shared float sdata[256 + 32];
 
@@ -102,54 +102,12 @@ float computeSSORCorrection(uint gid, uint N, bool valid[6], uint Lx, uint Ly) {
     uint LxLy = Lx * Ly;
     float corr = 0.0;
 
-    // -x 面鄰居 (direction 0 of current voxel)
-    if (valid[0]) {
-        uint j = gid - 1u;
-        float rj = r[j];
-        float d6j = sigma[0u*N+j] + sigma[1u*N+j] + sigma[2u*N+j]
-                  + sigma[3u*N+j] + sigma[4u*N+j] + sigma[5u*N+j];
-        corr += sigma[0u*N+gid] * ((d6j > 1e-20) ? rj / d6j : 0.0);
-    }
-    // +x 面鄰居 (direction 1)
-    if (valid[1]) {
-        uint j = gid + 1u;
-        float rj = r[j];
-        float d6j = sigma[0u*N+j] + sigma[1u*N+j] + sigma[2u*N+j]
-                  + sigma[3u*N+j] + sigma[4u*N+j] + sigma[5u*N+j];
-        corr += sigma[1u*N+gid] * ((d6j > 1e-20) ? rj / d6j : 0.0);
-    }
-    // -y 面鄰居 (direction 2)
-    if (valid[2]) {
-        uint j = gid - Lx;
-        float rj = r[j];
-        float d6j = sigma[0u*N+j] + sigma[1u*N+j] + sigma[2u*N+j]
-                  + sigma[3u*N+j] + sigma[4u*N+j] + sigma[5u*N+j];
-        corr += sigma[2u*N+gid] * ((d6j > 1e-20) ? rj / d6j : 0.0);
-    }
-    // +y 面鄰居 (direction 3)
-    if (valid[3]) {
-        uint j = gid + Lx;
-        float rj = r[j];
-        float d6j = sigma[0u*N+j] + sigma[1u*N+j] + sigma[2u*N+j]
-                  + sigma[3u*N+j] + sigma[4u*N+j] + sigma[5u*N+j];
-        corr += sigma[3u*N+gid] * ((d6j > 1e-20) ? rj / d6j : 0.0);
-    }
-    // -z 面鄰居 (direction 4)
-    if (valid[4]) {
-        uint j = gid - LxLy;
-        float rj = r[j];
-        float d6j = sigma[0u*N+j] + sigma[1u*N+j] + sigma[2u*N+j]
-                  + sigma[3u*N+j] + sigma[4u*N+j] + sigma[5u*N+j];
-        corr += sigma[4u*N+gid] * ((d6j > 1e-20) ? rj / d6j : 0.0);
-    }
-    // +z 面鄰居 (direction 5)
-    if (valid[5]) {
-        uint j = gid + LxLy;
-        float rj = r[j];
-        float d6j = sigma[0u*N+j] + sigma[1u*N+j] + sigma[2u*N+j]
-                  + sigma[3u*N+j] + sigma[4u*N+j] + sigma[5u*N+j];
-        corr += sigma[5u*N+gid] * ((d6j > 1e-20) ? rj / d6j : 0.0);
-    }
+    if (valid[0]) { uint j = gid - 1u; corr += sigma[0u*N+gid] * (r[j] * invDiag6[j]); }
+    if (valid[1]) { uint j = gid + 1u; corr += sigma[1u*N+gid] * (r[j] * invDiag6[j]); }
+    if (valid[2]) { uint j = gid - Lx; corr += sigma[2u*N+gid] * (r[j] * invDiag6[j]); }
+    if (valid[3]) { uint j = gid + Lx; corr += sigma[3u*N+gid] * (r[j] * invDiag6[j]); }
+    if (valid[4]) { uint j = gid - LxLy; corr += sigma[4u*N+gid] * (r[j] * invDiag6[j]); }
+    if (valid[5]) { uint j = gid + LxLy; corr += sigma[5u*N+gid] * (r[j] * invDiag6[j]); }
 
     return corr;
 }

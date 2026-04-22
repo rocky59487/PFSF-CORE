@@ -33,6 +33,7 @@ public final class PFSFPipelineFactory {
     static long pcgDirectionPipeline, pcgDirectionPipelineLayout, pcgDirectionDSLayout;
     // PCG dot product reduction (sum of a[i]*b[i])
     static long pcgDotPipeline, pcgDotPipelineLayout, pcgDotDSLayout;
+    static long pcgPrecomputePipeline, pcgPrecomputePipelineLayout, pcgPrecomputeDSLayout;
     // WSS-HQR vector field solver (Householder QR per 8³ macro-block)
     static long vectorSolvePipeline, vectorSolvePipelineLayout, vectorSolveDSLayout;
     // AMG V-Cycle: Restriction (Fine→Coarse) and Prolongation (Coarse→Fine)
@@ -100,11 +101,16 @@ public final class PFSFPipelineFactory {
 
             // PCG update: phi += alpha*p; r -= alpha*Ap; Jacobi precondition; compute r·z partial sums
             // v2: +binding 8 (conductivity) for on-the-fly Jacobi diagonal computation
-            // bindings: phi(0), r(1), p(2), Ap(3), source(4), type(5), partialSums(6), reductionBuf(7), sigma(8)
+            // v3: +binding 9 (invDiag6) for precomputed inverse diagonal
+            // bindings: phi(0), r(1), p(2), Ap(3), source(4), type(5), partialSums(6), reductionBuf(7), sigma(8), invDiag6(9)
             // push constant: Lx, Ly, Lz (3×uint) + alpha (float) + isInit (uint) + padding (uint) = 24 bytes
-            pcgUpdateDSLayout = VulkanComputeContext.createDescriptorSetLayout(9);
+            pcgUpdateDSLayout = VulkanComputeContext.createDescriptorSetLayout(10);
             pcgUpdatePipelineLayout = VulkanComputeContext.createPipelineLayout(pcgUpdateDSLayout, 24);
             pcgUpdatePipeline = compilePipeline("pfsf/pcg_update.comp.glsl", "pcg_update.comp", pcgUpdatePipelineLayout);
+
+            pcgPrecomputeDSLayout = VulkanComputeContext.createDescriptorSetLayout(2);
+            pcgPrecomputePipelineLayout = VulkanComputeContext.createPipelineLayout(pcgPrecomputeDSLayout, 12);
+            pcgPrecomputePipeline = compilePipeline("pfsf/pcg_precompute.comp.glsl", "pcg_precompute.comp", pcgPrecomputePipelineLayout);
 
             // PCG direction update: p = z + beta * p (z = M⁻¹r, Jacobi preconditioned)
             // v2: +binding 4 (conductivity) for on-the-fly Jacobi diagonal computation
@@ -197,19 +203,19 @@ public final class PFSFPipelineFactory {
         long[] pipelines = {
             jacobiPipeline, rbgsPipeline, restrictPipeline, prolongPipeline,
             failurePipeline, scatterPipeline, compactPipeline, reduceMaxPipeline, phaseFieldPipeline,
-            pcgMatvecPipeline, pcgUpdatePipeline, pcgDirectionPipeline, pcgDotPipeline,
+            pcgMatvecPipeline, pcgUpdatePipeline, pcgDirectionPipeline, pcgDotPipeline, pcgPrecomputePipeline,
             vectorSolvePipeline, amgRestrictPipeline, amgProlongPipeline
         };
         long[] pipelineLayouts = {
             jacobiPipelineLayout, rbgsPipelineLayout, restrictPipelineLayout, prolongPipelineLayout,
             failurePipelineLayout, scatterPipelineLayout, compactPipelineLayout, reduceMaxPipelineLayout, phaseFieldPipelineLayout,
-            pcgMatvecPipelineLayout, pcgUpdatePipelineLayout, pcgDirectionPipelineLayout, pcgDotPipelineLayout,
+            pcgMatvecPipelineLayout, pcgUpdatePipelineLayout, pcgDirectionPipelineLayout, pcgDotPipelineLayout, pcgPrecomputePipelineLayout,
             vectorSolvePipelineLayout, amgRestrictPipelineLayout, amgProlongPipelineLayout
         };
         long[] dsLayouts = {
             jacobiDSLayout, rbgsDSLayout, restrictDSLayout, prolongDSLayout,
             failureDSLayout, scatterDSLayout, compactDSLayout, reduceMaxDSLayout, phaseFieldDSLayout,
-            pcgMatvecDSLayout, pcgUpdateDSLayout, pcgDirectionDSLayout, pcgDotDSLayout,
+            pcgMatvecDSLayout, pcgUpdateDSLayout, pcgDirectionDSLayout, pcgDotDSLayout, pcgPrecomputeDSLayout,
             vectorSolveDSLayout, amgRestrictDSLayout, amgProlongDSLayout
         };
 
