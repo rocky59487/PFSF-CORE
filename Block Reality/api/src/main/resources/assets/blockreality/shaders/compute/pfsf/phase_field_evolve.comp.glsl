@@ -1,0 +1,165 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : enable
+
+// ═══════════════════════════════════════════════════════════════
+//  PFSF Phase-Field Evolution（v2.1 旗艦特性）
+//
+//  實作：Ambati 2015 增量線性混合相場公式
+//  (Ambati, M., Gerasimov, T., & De Lorenzis, L., 2015,
+//   "A review on phase-field models of brittle fracture and a
+//    new fast hybrid formulation", Computational Mechanics)
+//
+//  離散方程（6-鄰域有限差分）：
+//    H_i = max(H_i, ψ_e_i)          ← 已在 jacobi/rbgs 中完成
+//    ∇²d ≈ Σ_{j∈N(i)} (d_j - d_i) / (l0²)
+//    d_new = (H_i + l0² × ∇²d_i) / (H_i + G_c/(2l0))
+//    d_new = clamp(d_new, 0, 1)
+//    d_i ← mix(d_i, d_new, relax)   ← 鬆弛因子防過衝
+//
+//  G_c 固化時間效應：G_c_eff = G_c_base × hydration^1.5
+//
+//  Workgroup: 256 threads（1D flat）
+// ═══════════════════════════════════════════════════════════════
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+    uint  Lx, Ly, Lz;           // island grid dimensions
+    float l0;                    // 正則化長度尺度（blocks），強制 ≥ 2.0
+    float gcBase;                // 基礎臨界能量釋放率 G_c（J/m²），隨材料不同
+    float relax;                 // 鬆弛因子 ∈ (0,1]，建議 0.3（防過衝）
+    uint  spectralSplitEnabled;  // 0=legacy, 1=AT2+spectral split（僅拉伸驅動損傷）
+} pc;
+
+// ─── Buffer bindings（匹配 PFSFPipelineFactory.phaseFieldDSLayout）───
+layout(set = 0, binding = 0) readonly buffer Phi       { float phi[];       };  // 勢能場（唯讀）
+layout(set = 0, binding = 1) readonly buffer HField     { float hField[];    };  // D3-fix: 歷史應變能場（唯讀，由 smoother 獨佔寫入）
+layout(set = 0, binding = 2) buffer         DField     { float dField[];    };  // 損傷場（讀寫）
+layout(set = 0, binding = 3) readonly buffer Cond      { float sigma[];     };  // 傳導率（6N SoA）
+layout(set = 0, binding = 4) readonly buffer Type      { uint  vtype[];     };  // 體素類型
+layout(set = 0, binding = 5) buffer         FailFlags  { uint  failFlags[]; };  // 斷裂標記（寫入）
+layout(set = 0, binding = 6) readonly buffer Hydration { float hydration[]; };  // 水化度 [0,1]
+
+uint gIdx(uint x, uint y, uint z) {
+    return x + pc.Lx * (y + pc.Ly * z);
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    uint N = pc.Lx * pc.Ly * pc.Lz;
+    if (i >= N) return;
+
+    // 跳過空氣與錨點
+    if (vtype[i] == 0u || vtype[i] == 2u) return;
+
+    // 已斷裂的體素不再演化（防止重複觸發）
+    if (failFlags[i] != 0u) return;
+
+    // ─── 還原 3D 座標 ───
+    uint gx = i % pc.Lx;
+    uint rem = i / pc.Lx;
+    uint gy = rem % pc.Ly;
+    uint gz = rem / pc.Ly;
+
+    float phi_i = phi[i];
+    float sumSigma = 0.0;
+    uint N_cond = N;
+
+    float laplacian_phi = 0.0;
+    float laplacian_d   = 0.0;
+    float d_i = dField[i];
+    int valid_count = 0;
+
+    int igx = int(gx), igy = int(gy), igz = int(gz);
+    int dx[6] = int[6](-1, 1,  0, 0,  0, 0);
+    int dy[6] = int[6]( 0, 0, -1, 1,  0, 0);
+    int dz[6] = int[6]( 0, 0,  0, 0, -1, 1);
+
+    for (int d = 0; d < 6; d++) {
+        int nx = igx + dx[d];
+        int ny = igy + dy[d];
+        int nz = igz + dz[d];
+        if (nx < 0 || nx >= int(pc.Lx) ||
+            ny < 0 || ny >= int(pc.Ly) ||
+            nz < 0 || nz >= int(pc.Lz)) continue;
+
+        uint j = gIdx(uint(nx), uint(ny), uint(nz));
+        if (vtype[j] == 0u) continue;  // 空氣鄰居不貢獻
+
+        float s = sigma[d * N_cond + i];
+        float phi_j = phi[j];
+        float d_j   = dField[j];
+
+        // phi Laplacian（用於補充 H_field 估計）
+        if (!isnan(phi_j) && !isinf(phi_j)) {
+            laplacian_phi += (phi_j - phi_i);
+            sumSigma += s;
+        }
+
+        // d_field Laplacian（用於相場擴散方程）
+        if (!isnan(d_j) && !isinf(d_j)) {
+            laplacian_d += (d_j - d_i);
+            valid_count++;
+        }
+    }
+
+    // D3-fix: H_field 由 Jacobi/RBGS smoother 獨佔寫入（max(H, psi_e)）。
+    // 此處僅唯讀，避免與 smoother 的 GPU 寫入競爭（race condition）。
+    // 若 smoother 尚未更新此格，H 仍為上一 tick 的值 → 保守（不會過早損傷）。
+    float H_val = hField[i];
+    if (H_val <= 0.0) return;  // 無應變能驅動，d 不演化
+
+    // ─── Ambati 2015 混合相場公式（線性化，無需 Newton-Raphson）───
+    //
+    // 離散 PDE：(H_eff + G_c/(2l0)) × d - l0² × ∇²d = H_eff
+    // → d_new = (H_eff + l0² × ∇²d_old) / (H_eff + G_c/(2l0))
+    //
+    // 其中：
+    //   ∇²d = Σ(d_j - d_i) / l0²  （有限差分，l0² 為擴散係數）
+    //   G_c_eff = G_c_base × hydration[i]^1.5（固化時間效應）
+    //
+    // 數學保證：分母 H_eff + G_c/(2l0) > 0 恆成立 → 無條件數值穩定
+
+    // 固化時間效應：G_c 隨水化度縮放
+    float hDeg = clamp(hydration[i], 0.01, 1.0);  // 避免 hDeg=0 使 G_c=0
+    float Gc_eff = pc.gcBase * pow(hDeg, 1.5);    // G_c(t) = G_c_final × H^1.5
+
+    // ─── AT2 Spectral Split（Ambati 2015 + Miehe 2010）───
+    // 僅拉伸應變能密度 ψ⁺ 驅動損傷，壓縮 ψ⁻ 不觸發裂紋。
+    float H_eff = H_val;
+    if (pc.spectralSplitEnabled != 0u) {
+        float sigma_diag = max(sumSigma, 1e-12);
+        float flux_out = max( laplacian_phi, 0.0);
+        float psi_plus = flux_out / sigma_diag;
+        H_eff = max(H_val, psi_plus);
+    }
+
+    // Ambati 2015 AT2 型離散 PDE（正確係數）：
+    //   (2H + Gc/l0) d - Gc·l0·∇²d = 2H
+    //   → d_new = (2H + Gc·l0·∇²d) / (2H + Gc/l0)
+    //
+    // 舊版錯誤：分子用 l0²·∇²d（缺少 Gc 因子），裂縫擴散寬度縮水 ~Gc/l0 倍。
+    // 對混凝土（Gc=100, l0=1.5）：舊版擴散係數 2.25 vs 正確 150 → 差 67 倍。
+    float numerator   = 2.0 * H_eff + Gc_eff * pc.l0 * laplacian_d;
+    float denominator = 2.0 * H_eff + Gc_eff / pc.l0;
+    denominator = max(denominator, 1e-8);  // 防除零
+
+    // 單調性保證：d 只增不減（不可逆損傷）
+    float d_new = clamp(numerator / denominator, d_i, 1.0);
+
+    // 鬆弛更新（防過衝，pc.relax = 0.3）
+    d_new = mix(d_i, d_new, pc.relax);
+    d_new = clamp(d_new, 0.0, 1.0);
+
+    // NaN 防護
+    if (isnan(d_new) || isinf(d_new)) d_new = d_i;
+
+    dField[i] = d_new;
+
+    // ─── 斷裂觸發（PHASE_FIELD_FRACTURE_THRESHOLD = 0.95）───
+    // d > 0.95 → 寫入 FAIL_CANTILEVER（最接近的現有斷裂模式），
+    // 由 PFSFFailureApplicator 讀回後觸發 CollapseManager 連鎖崩塌。
+    if (d_new > 0.95) {
+        failFlags[i] = 1u;  // FAIL_CANTILEVER（懸臂/相場斷裂）
+    }
+}

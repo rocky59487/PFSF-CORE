@@ -1,0 +1,333 @@
+package com.blockreality.api.physics.pfsf;
+
+import com.blockreality.api.collapse.CollapseManager;
+import com.blockreality.api.config.BRConfig;
+import com.blockreality.api.material.RMaterial;
+import com.blockreality.api.physics.AnchorContinuityChecker;
+import com.blockreality.api.physics.FailureType;
+import com.blockreality.api.physics.StructureIslandRegistry;
+import com.blockreality.api.physics.StructureIslandRegistry.StructureIsland;
+import com.blockreality.api.physics.StressField;
+
+import net.minecraft.core.BlockPos;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.phys.Vec3;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.Function;
+
+import static com.blockreality.api.physics.pfsf.PFSFConstants.*;
+
+/**
+ * PFSF 引擎實例 — v0.2a + BIFROST 混合路由。{@link PFSFEngine} 保留 static facade，
+ * 委託給 singleton instance；實作 {@link IPFSFRuntime} 以支援 hybrid dispatch。
+ */
+public final class PFSFEngineInstance implements IPFSFRuntime {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger("PFSF-Engine");
+
+    private boolean initialized = false;
+    private boolean available = false;
+    private DescriptorPoolManager descriptorPoolMgr;
+    private final IslandBufferEvictor evictor = new IslandBufferEvictor();
+    private int tickCounter = 0;
+    private long lastProcessedEpoch = -1;
+
+    private Function<BlockPos, RMaterial> materialLookup;
+    private Function<BlockPos, Boolean> anchorLookup;
+    private Function<BlockPos, Float> fillRatioLookup;
+    private Function<BlockPos, Float> curingLookup;
+    private Vec3 currentWindVec;
+
+    private final PFSFResultProcessor resultProcessor = new PFSFResultProcessor();
+    private final PFSFDispatcher dispatcher = new PFSFDispatcher();
+    private final List<PFSFAsyncCompute.ComputeFrame> batch = new ArrayList<>(3);
+    private final List<Runnable> callbacks = new ArrayList<>(3);
+
+    @Override
+    public void init() {
+        if (initialized) return;
+        initialized = true;
+        if (!VulkanComputeContext.isAvailable()) {
+            LOGGER.warn("[PFSF] VulkanComputeContext not available, engine disabled");
+            available = false;
+            return;
+        }
+        try {
+            PFSFPipelineFactory.createAll();
+            // 4096 sets / 16384 bindings: each island ~15 DS/tick (RBGS×8+PCG×4+failure×3);
+            // supports ~270 islands per 40-tick pool window before exhaustion.
+            long pool = VulkanComputeContext.createIsolatedDescriptorPool(4096, 16384, "PFSF");
+            if (pool == 0) {
+                LOGGER.error("[PFSF] createIsolatedDescriptorPool returned 0 handle — init aborted");
+                available = false;
+                return;
+            }
+            descriptorPoolMgr = new DescriptorPoolManager(pool, 4096, "PFSF");
+            available = true;
+            // PR#187 capy-ai R15: register the canonical augmentation binders
+            // in production. Without this, PFSFAugmentationHost.BINDERS stays
+            // empty for every real tick and v0.4 M2's aug pipeline is inert.
+            com.blockreality.api.physics.pfsf.augbind.DefaultAugmentationBinders.install();
+            LOGGER.info("[PFSF] Engine initialized successfully");
+        } catch (Throwable e) {
+            LOGGER.error("[PFSF] Engine init failed", e);
+            available = false;
+        }
+    }
+
+    @Override
+    public void onServerTick(ServerLevel level, List<ServerPlayer> players, long currentEpoch) {
+        if (!available) return;
+        PFSFAsyncCompute.pollCompleted();
+        descriptorPoolMgr.tickResetIfNeeded();
+        evictor.tick();
+        tickCounter++;
+        if (tickCounter % evictor.getCheckInterval() == 0) {
+            evictor.evictIfNeeded(VulkanComputeContext.getVramBudgetManager());
+        }
+        final long descriptorPool = descriptorPoolMgr.getPool();
+        final VramBudgetManager vramMgr = VulkanComputeContext.getVramBudgetManager();
+        final long startTime = System.nanoTime();
+        batch.clear();
+        callbacks.clear();
+
+        for (Map.Entry<Integer, StructureIsland> entry :
+                StructureIslandRegistry.getDirtyIslands(lastProcessedEpoch).entrySet()) {
+            if ((System.nanoTime() - startTime) / 1_000_000 >= BRConfig.getPFSFTickBudgetMs()) break;
+            int islandId = entry.getKey();
+            StructureIsland island = entry.getValue();
+            if (island == null) continue;
+            if (island.getBlockCount() < 1 || island.getBlockCount() > BRConfig.getPFSFMaxIslandSize()) continue;
+            
+            evictor.touchIsland(islandId);
+            PFSFIslandBuffer buf = PFSFBufferManager.getOrCreateBuffer(island);
+            if (buf == null) continue;
+            PFSFAsyncCompute.ComputeFrame frame = PFSFAsyncCompute.acquireFrame();
+            if (frame == null) { flushBatch(); break; }
+            frame.islandId = islandId;
+
+            /* v0.4 M2: fire SPI aug binders before uploading source /
+             * conductivity so the registry carries this tick's fresh
+             * per-voxel contributions. runBinders swallows binder
+             * exceptions, so a broken SPI never breaks the tick.
+             *
+             * PR#187 capy-ai R54: gate on the native runtime actually
+             * routing. PFSFTickPlanner.pushAug* opcodes are the ONLY
+             * consumer of the DBBs runBinders publishes, and they fire
+             * exclusively through NativePFSFBridge.nativeTickDbb which
+             * is itself gated by NativePFSFRuntime.areKernelsPorted().
+             * While KERNELS_PORTED=false the Java path here never feeds
+             * the planner, so runBinders would scan every dirty voxel,
+             * allocate DBBs, and hold strong refs on PFSFAugmentationHost
+             * for readers that never arrive — pure overhead. Re-enable
+             * automatically once the native kernels flip live. */
+            if (NativePFSFRuntime.areKernelsPorted()) {
+                PFSFAugmentationHost.runBinders(islandId);
+            }
+
+            uploadIslandData(frame, buf, island, level, islandId, descriptorPool);
+            if (updateLodAndSkipDormant(buf, players, islandId)) continue;
+            float change = computeConvergenceChange(buf);
+            if (skipConvergedIsland(buf, change, islandId)) continue;
+            int steps = computeAdjustedSteps(buf, vramMgr, change);
+            if (!recordGpuDispatch(frame, buf, steps, islandId, descriptorPool)) continue;
+
+            scheduleFrameCompletion(frame, buf, level);
+            StructureIslandRegistry.markProcessed(islandId);
+            if (batch.size() >= 3) flushBatch();
+        }
+        flushBatch();
+        lastProcessedEpoch = currentEpoch;
+    }
+
+    private Set<BlockPos> gatherStructuralAnchors(ServerLevel level, StructureIsland island) {
+        Set<BlockPos> anchors = new HashSet<>();
+        for (BlockPos p : island.getMembers()) {
+            if (AnchorContinuityChecker.isNaturalAnchor(level, p)) anchors.add(p);
+        }
+        return anchors;
+    }
+
+    private void uploadIslandData(PFSFAsyncCompute.ComputeFrame frame, PFSFIslandBuffer buf,
+                                   StructureIsland island, ServerLevel level,
+                                   int islandId, long descriptorPool) {
+        PFSFSparseUpdate sparse = PFSFBufferManager.sparseTrackers.computeIfAbsent(
+                islandId, PFSFSparseUpdate::new);
+        PFSFEngine.UploadContext ctx = new PFSFEngine.UploadContext(island, level,
+                materialLookup, anchorLookup, fillRatioLookup, curingLookup, currentWindVec,
+                null);
+        dispatcher.handleDataUpload(frame, buf, sparse, ctx, descriptorPool);
+    }
+
+    private boolean updateLodAndSkipDormant(PFSFIslandBuffer buf, List<ServerPlayer> players, int islandId) {
+        int lod = PFSFLODPolicy.computeLodLevel(buf, players);
+        buf.setLodLevel(lod);
+        buf.decrementWakeTicks();
+        if (lod == LOD_DORMANT && buf.getWakeTicksRemaining() <= 0) {
+            StructureIslandRegistry.markProcessed(islandId);
+            return true;
+        }
+        return false;
+    }
+
+    private static float computeConvergenceChange(PFSFIslandBuffer buf) {
+        if (buf.maxPhiPrev > 0 && buf.maxPhiPrevPrev > 0)
+            return Math.abs(buf.maxPhiPrev - buf.maxPhiPrevPrev) / buf.maxPhiPrev;
+        return 0;
+    }
+
+    private static boolean skipConvergedIsland(PFSFIslandBuffer buf, float change, int islandId) {
+        if (change > 0 && change < CONVERGENCE_SKIP_THRESHOLD) {
+            if (buf.getStableTickCount() < Integer.MAX_VALUE) buf.incrementStableCount();
+        } else if (change >= CONVERGENCE_SKIP_THRESHOLD) {
+            buf.resetStableCount();
+        }
+        if (buf.getStableTickCount() > STABLE_TICK_SKIP_COUNT) {
+            StructureIslandRegistry.markProcessed(islandId);
+            return true;
+        }
+        return false;
+    }
+
+    private static int computeAdjustedSteps(PFSFIslandBuffer buf, VramBudgetManager vramMgr, float change) {
+        // ★ Fix 2: isDirty = stableTickCount==0 表示方塊剛變化（notifyBlockChange 重置了計數），
+        // 確保拓撲改變後的首個 tick 跑 STEPS_MAJOR=16 而非 STEPS_MINOR=4。
+        boolean isDirty = buf.getStableTickCount() == 0;
+        int steps = PFSFLODPolicy.adjustStepsForLod(
+                ComputeRangePolicy.adjustSteps(PFSFScheduler.recommendSteps(buf, isDirty, false), vramMgr),
+                buf.getLodLevel());
+        if (change > 0 && change < CONVERGENCE_REDUCE_THRESHOLD) steps = Math.max(1, steps / 2);
+        if (buf.maxPhiPrev > 0 && buf.maxPhiPrevPrev > 0) {
+            if (change < EARLY_TERM_TIGHT)      steps = Math.max(1, steps / 4);
+            else if (change < EARLY_TERM_LOOSE) steps = Math.max(2, steps / 2);
+        }
+        if (buf.cachedMacroResiduals != null) {
+            float activeRatio = PFSFScheduler.getActiveRatio(buf.cachedMacroResiduals);
+            if (activeRatio < 0.1f)      steps = Math.max(1, steps / 4);
+            else if (activeRatio < 0.5f) steps = Math.max(1, steps / 2);
+        }
+        return steps;
+    }
+
+    private boolean recordGpuDispatch(PFSFAsyncCompute.ComputeFrame frame, PFSFIslandBuffer buf,
+                                       int steps, int islandId, long descriptorPool) {
+        try {
+            dispatcher.recordSolveSteps(frame.cmdBuf, buf, steps, descriptorPool);
+            if (steps > 0) {
+                // Barriers protect solver → phase-field → failure_scan from GPU WAW hazards.
+                VulkanComputeContext.computeBarrier(frame.cmdBuf);
+                if (buf.getStableTickCount() <= STABLE_TICK_PHASE_FIELD_SKIP) {
+                    dispatcher.recordPhaseFieldEvolve(frame.cmdBuf, buf, descriptorPool);
+                }
+                VulkanComputeContext.computeBarrier(frame.cmdBuf);
+                dispatcher.recordFailureDetection(frame, buf, descriptorPool);
+            }
+            return true;
+        } catch (Exception e) {
+            LOGGER.error("[PFSF] GPU recording failed for island {}: {}", islandId, e.getMessage());
+            PFSFAsyncCompute.releaseFrame(frame);
+            return false;
+        }
+    }
+
+    private void scheduleFrameCompletion(PFSFAsyncCompute.ComputeFrame frame,
+                                          PFSFIslandBuffer buf, ServerLevel level) {
+        buf.acquire();  // paired with release() inside the callback
+        batch.add(frame);
+        callbacks.add(() -> {
+            try { resultProcessor.processCompletedFrame(frame, buf, level); }
+            finally { buf.release(); }
+        });
+    }
+
+    private void flushBatch() {
+        if (batch.isEmpty()) return;
+        PFSFAsyncCompute.submitBatch(batch, callbacks);
+        batch.clear();
+        callbacks.clear();
+    }
+
+    @Override
+    public void notifyBlockChange(int islandId, BlockPos pos, RMaterial newMaterial, Set<BlockPos> anchors) {
+        PFSFSparseUpdate sparse = PFSFBufferManager.sparseTrackers.computeIfAbsent(
+                islandId, PFSFSparseUpdate::new);
+        PFSFIslandBuffer buf = PFSFBufferManager.buffers.get(islandId);
+        if (buf == null || !buf.contains(pos)) { sparse.markFullRebuild(); return; }
+        // 方塊/負載變化 → 重置收斂計數、喚醒 DORMANT、更新拓撲版本。
+        buf.resetStableCount();
+        if (buf.getLodLevel() == LOD_DORMANT) buf.setWakeTicksRemaining(LOD_WAKE_TICKS);
+        int flatIdx = buf.flatIndex(pos);
+        boolean wasAir = (sparse.getLastKnownType(flatIdx) == VOXEL_AIR);
+        if (newMaterial == null || wasAir) buf.incrementTopologyVersion();
+        // Sparse conductivity rebuild incomplete (new float[6] isolates the voxel);
+        // force full rebuild until Phase 6 lands proper delta upload.
+        sparse.markFullRebuild();
+    }
+
+    @Override public void setMaterialLookup(Function<BlockPos, RMaterial> lookup) { this.materialLookup = lookup; }
+    @Override public void setAnchorLookup(Function<BlockPos, Boolean> lookup)    { this.anchorLookup = lookup; }
+    @Override public void setFillRatioLookup(Function<BlockPos, Float> lookup)   { this.fillRatioLookup = lookup; }
+    @Override public void setCuringLookup(Function<BlockPos, Float> lookup)      { this.curingLookup = lookup; }
+
+    /* v0.4 M2e — read-side accessors so aug binders can source voxel
+     * data via the same hooks the engine already uses. These are NOT on
+     * IPFSFRuntime because OnnxPFSFRuntime has no Java-side lookup state —
+     * the getters are specific to the native / hybrid backend. */
+    public Function<BlockPos, RMaterial> getMaterialLookup() { return materialLookup; }
+    public Function<BlockPos, Boolean>   getAnchorLookup()   { return anchorLookup; }
+    public Function<BlockPos, Float>     getFillRatioLookup() { return fillRatioLookup; }
+    public Function<BlockPos, Float>     getCuringLookup()   { return curingLookup; }
+    public net.minecraft.world.phys.Vec3 getCurrentWindVec() { return currentWindVec; }
+    @Override public void setWindVector(Vec3 wind)                                { this.currentWindVec = wind; }
+
+    long getDescriptorPool() { return descriptorPoolMgr != null ? descriptorPoolMgr.getPool() : 0; }
+    @Override public boolean isAvailable() { return available; }
+
+    @Override
+    public void shutdown() {
+        if (!initialized) return;
+        // PR#187 capy-ai R40: freeAll() must run BEFORE uninstalling
+        // binders so clearAllFully() can iterate them to release each
+        // island's cached DBB. (unregisterBinder also drops the whole
+        // cache as a backstop for native-off builds where STRONG_REFS
+        // stays empty — together these cover both the native and
+        // java-only shutdown paths.)
+        //
+        // Re-init safety: DefaultAugmentationBinders.install() is
+        // idempotent via its INSTALLED.isEmpty() guard, so the order of
+        // freeAll() vs uninstall() doesn't affect duplicate install
+        // prevention as long as both complete before the next init().
+        PFSFAsyncCompute.shutdown();
+        PFSFBufferManager.freeAll();
+        com.blockreality.api.physics.pfsf.augbind.DefaultAugmentationBinders.uninstall();
+        if (descriptorPoolMgr != null) { descriptorPoolMgr.destroy(); descriptorPoolMgr = null; }
+        evictor.reset();
+        initialized = false;
+        available = false;
+        LOGGER.info("[PFSF] Engine shut down");
+    }
+
+    @Override
+    public String getStats() {
+        if (!available) return "PFSF Engine: DISABLED";
+        VramBudgetManager vramMgr = VulkanComputeContext.getVramBudgetManager();
+        return String.format("PFSF Engine: %d islands buffered, %d total voxels, VRAM: %.1f%% (desc pool: %.0f%%)",
+                PFSFBufferManager.buffers.size(),
+                PFSFBufferManager.buffers.values().stream().mapToInt(PFSFIslandBuffer::getN).sum(),
+                vramMgr.getPressure() * 100,
+                descriptorPoolMgr != null ? descriptorPoolMgr.getUsageRatio() * 100 : 0f);
+    }
+
+    StressField extractStressField(PFSFIslandBuffer buf) { return PFSFStressExtractor.extractStressField(buf); }
+
+    @Override public void removeBuffer(int islandId) { PFSFBufferManager.removeBuffer(islandId); }
+
+    }

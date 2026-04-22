@@ -1,0 +1,66 @@
+{
+  "_comment": "AUTO-GENERATED seed calibrations. Produced by :api:pfsfCalibrate (offline). Edits will be overwritten.",
+  "schemaVersion": 2,
+  "entries": [
+    {
+      "materialId": "concrete_c30",
+      "voxelScale": 1,
+      "boundary": "ANCHORED_BOTTOM",
+      "sigmaEff": 1.0,
+      "gcEff": 0.12,
+      "l0Eff": 1.5,
+      "phaseFieldExponent": 2.0,
+      "rcompEff": 30.0,
+      "rtensEff": 3.0,
+      "edgePenaltyEff": 0.35,
+      "cornerPenaltyEff": 0.15,
+      "timestamp": 1713772800,
+      "solverCommit": "seed"
+    },
+    {
+      "materialId": "concrete_c30",
+      "voxelScale": 2,
+      "boundary": "ANCHORED_BOTTOM",
+      "sigmaEff": 1.0,
+      "gcEff": 0.14,
+      "l0Eff": 1.8,
+      "phaseFieldExponent": 2.0,
+      "rcompEff": 30.0,
+      "rtensEff": 3.0,
+      "edgePenaltyEff": 0.38,
+      "cornerPenaltyEff": 0.17,
+      "timestamp": 1713772800,
+      "solverCommit": "seed"
+    },
+    {
+      "materialId": "steel_s355",
+      "voxelScale": 1,
+      "boundary": "ANCHORED_BOTTOM",
+      "sigmaEff": 1.0,
+      "gcEff": 0.50,
+      "l0Eff": 1.5,
+      "phaseFieldExponent": 4.0,
+      "rcompEff": 355.0,
+      "rtensEff": 500.0,
+      "edgePenaltyEff": 0.35,
+      "cornerPenaltyEff": 0.15,
+      "timestamp": 1713772800,
+      "solverCommit": "seed"
+    },
+    {
+      "materialId": "brick",
+      "voxelScale": 1,
+      "boundary": "ANCHORED_BOTH_ENDS",
+      "sigmaEff": 0.8,
+      "gcEff": 0.05,
+      "l0Eff": 1.2,
+      "phaseFieldExponent": 2.0,
+      "rcompEff": 10.0,
+      "rtensEff": 0.5,
+      "edgePenaltyEff": 0.32,
+      "cornerPenaltyEff": 0.13,
+      "timestamp": 1713772800,
+      "solverCommit": "seed"
+    }
+  ]
+}

@@ -1,0 +1,1076 @@
+// ═══ Buildscript: ASM for Library.class bytecode patching ═══
+// ASM is needed to patch org.lwjgl.system.Library.findResource() to handle
+// null classloader (which occurs when Library is loaded by bootstrap CL via
+// -Xbootclasspath/a:). The patched jar is listed FIRST in the boot classpath
+// so the JVM uses our version, preventing ExceptionInInitializerError.
+buildscript {
+    repositories {
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'org.ow2.asm:asm:9.6'
+        classpath 'org.ow2.asm:asm-commons:9.6'
+    }
+}
+
+import org.objectweb.asm.ClassReader
+import org.objectweb.asm.ClassVisitor
+import org.objectweb.asm.ClassWriter
+import org.objectweb.asm.Label
+import org.objectweb.asm.MethodVisitor
+import org.objectweb.asm.Opcodes
+
+plugins {
+    id 'java'
+    id 'eclipse'
+    id 'idea'
+    id 'net.minecraftforge.gradle' version '6.0.24'  // ★ M4-fix: 鎖定具體版本，避免構建不確定性
+}
+
+// ★ JarInJar：生產 Minecraft 中 lwjgl-vma/shaderc 不在任何 ClassLoader，
+//   必須透過 Forge JarInJar 機制嵌入 mod JAR，Forge mod 載入器會在 mod init 前
+//   將這些 inner JAR 加入 classpath，解決 org.lwjgl.util.vma.* 找不到的問題。
+jarJar.enable()
+
+group   = 'com.blockreality'
+version = '1.0.0'
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(17)
+}
+
+minecraft {
+    mappings channel: 'official', version: '1.20.1'
+    accessTransformer = file('src/main/resources/META-INF/accesstransformer.cfg')
+
+    runs {
+        client {
+            workingDirectory project.file('run')
+            property 'forge.logging.console.level', 'debug'
+            mods { blockreality { source sourceSets.main } }
+        }
+        server {
+            workingDirectory project.file('run')
+            property 'forge.logging.console.level', 'debug'
+            mods { blockreality { source sourceSets.main } }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  LWJGL Vulkan / VMA / Shaderc 嵌入（Forge 1.20.1 不含這些模組）
+// ═══════════════════════════════════════════════════════════════════
+//
+//  ★ 根本問題（M6 最終修正）：
+//    - -Xbootclasspath/a: 讓 Forge TCL 可找到 org.lwjgl.vulkan.*
+//    - 但 Library.class 被 bootstrap classloader 載入 → getClassLoader() 回傳 null
+//    - Library.findResource() 直接呼叫 null.getResource() → NPE → ExceptionInInitializerError
+//
+//  ★ 解決方案：
+//    1. patchLwjglLibrary task：用 ASM 修補 Library.class，
+//       在每個 Class.getClassLoader() 呼叫後加入 null check，
+//       null 時改用 Thread.currentThread().getContextClassLoader()
+//    2. 修補後的 jar（lwjgl-core-patched.jar）列在 -Xbootclasspath/a: 最前面，
+//       JVM 優先找到修補版本
+//    3. findResource() 返回 null（沒有 NPE）→ loadSystem() 改用
+//       System.loadLibrary("vulkan-1") → 從系統 PATH 找到 vulkan-1.dll → 成功！
+// ═══════════════════════════════════════════════════════════════════
+
+configurations {
+    lwjglBootstrap  // LWJGL 主 API jar + native jar，用於 boot classpath 注入
+}
+
+dependencies {
+    minecraft "net.minecraftforge:forge:1.20.1-47.4.13"
+
+    // ★ LWJGL 3.3.1 (Minecraft 1.20.1 matching version)
+    // Use minecraftLibrary so ForgeGradle explicitly adds them to the ModuleLayer (GAME layer),
+    // avoiding JPMS ClassNotFoundException for org.lwjgl.vulkan.VK and eliminating the need
+    // for dangerous classpath/bootclasspath prepending hacks that cause UnsatisfiedLinkError.
+    minecraftLibrary("org.lwjgl:lwjgl-vulkan:3.3.1") { exclude group: 'org.lwjgl', module: 'lwjgl' }
+    minecraftLibrary("org.lwjgl:lwjgl-vma:3.3.1") { exclude group: 'org.lwjgl', module: 'lwjgl' }
+    minecraftLibrary("org.lwjgl:lwjgl-shaderc:3.3.1") { exclude group: 'org.lwjgl', module: 'lwjgl' }
+    minecraftLibrary("org.lwjgl:lwjgl-vma:3.3.1:natives-windows") { exclude group: 'org.lwjgl', module: 'lwjgl' }
+    minecraftLibrary("org.lwjgl:lwjgl-vma:3.3.1:natives-linux") { exclude group: 'org.lwjgl', module: 'lwjgl' }
+    minecraftLibrary("org.lwjgl:lwjgl-shaderc:3.3.1:natives-windows") { exclude group: 'org.lwjgl', module: 'lwjgl' }
+    minecraftLibrary("org.lwjgl:lwjgl-shaderc:3.3.1:natives-linux") { exclude group: 'org.lwjgl', module: 'lwjgl' }
+
+    // ★ ONNX Runtime — BIFROST FNO ML inference
+    // JarInJar 確保生產 Minecraft 中 ai.onnxruntime.* 可用。
+    // onnxruntime JAR 已內建所有平台 native（.dll/.so 打包在 jar 內），不需要額外 native classifier。
+    // BIFROSTModelRegistry 有 ClassNotFoundException guard，ML 不可用時靜默降級到 CPU solver。
+    jarJar(implementation("com.microsoft.onnxruntime:onnxruntime:[1.17.3, 1.18.0)")) {
+        jarJar.pin(it, "1.17.3")
+    }
+
+    compileOnly 'com.google.code.findbugs:jsr305:3.0.2'
+
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.9.3'
+    testImplementation 'org.junit.jupiter:junit-jupiter-params:5.9.3'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.9.3'
+    testImplementation 'org.mockito:mockito-core:5.11.0'
+    testImplementation 'org.mockito:mockito-junit-jupiter:5.11.0'
+
+    // ★ Vulkan smoke tests — LWJGL natives on test classpath（SharedLibraryLoader 自動解壓）
+    testRuntimeOnly "org.lwjgl:lwjgl:3.3.1:natives-linux"
+    testRuntimeOnly "org.lwjgl:lwjgl-vma:3.3.1:natives-linux"
+    testRuntimeOnly "org.lwjgl:lwjgl-shaderc:3.3.1:natives-linux"
+
+    // ★ JarInJar — 生產環境 classpath 修復
+    // Minecraft 1.20.1 僅捆綁 lwjgl-core/glfw/opengl/openal/stb/jemalloc/tinyfd，
+    // 不含 lwjgl-vulkan、lwjgl-vma、lwjgl-shaderc。
+    // jarJar 將這些 JAR 嵌入 mod JAR 的 META-INF/jarjar/，Forge 在 mod 載入前解壓並加入 classpath。
+    // lwjgl-vulkan 為純 Java binding（無 native），vma/shaderc 需要 native JAR。
+    jarJar(implementation("org.lwjgl:lwjgl-vulkan:[3.3.1, 3.4.0)")) {
+        jarJar.pin(it, "3.3.1")
+    }
+    jarJar(implementation("org.lwjgl:lwjgl-vma:[3.3.1, 3.4.0)")) {
+        jarJar.pin(it, "3.3.1")
+    }
+    jarJar(implementation("org.lwjgl:lwjgl-shaderc:[3.3.1, 3.4.0)")) {
+        jarJar.pin(it, "3.3.1")
+    }
+    // Native JARs — LWJGL SharedLibraryLoader 從 classpath JAR 中提取 .dll/.so
+    // ★ FG6 限制：classifier 依賴（natives-*）無法同時使用 jarJar.pin()（InvalidUserCodeException）
+    //   直接指定精確版本，不使用 pin()
+    jarJar(runtimeOnly("org.lwjgl:lwjgl-vma:[3.3.1, 3.4.0):natives-windows"))
+    jarJar(runtimeOnly("org.lwjgl:lwjgl-vma:[3.3.1, 3.4.0):natives-linux"))
+    jarJar(runtimeOnly("org.lwjgl:lwjgl-vma:[3.3.1, 3.4.0):natives-macos"))
+    jarJar(runtimeOnly("org.lwjgl:lwjgl-vma:[3.3.1, 3.4.0):natives-macos-arm64"))
+    jarJar(runtimeOnly("org.lwjgl:lwjgl-shaderc:[3.3.1, 3.4.0):natives-windows"))
+    jarJar(runtimeOnly("org.lwjgl:lwjgl-shaderc:[3.3.1, 3.4.0):natives-linux"))
+    jarJar(runtimeOnly("org.lwjgl:lwjgl-shaderc:[3.3.1, 3.4.0):natives-macos"))
+    jarJar(runtimeOnly("org.lwjgl:lwjgl-shaderc:[3.3.1, 3.4.0):natives-macos-arm64"))
+}
+
+test {
+    useJUnitPlatform()
+
+    // ★ Vulkan smoke tests：lavapipe ICD + software renderer
+    // Colon-separated — the Vulkan loader iterates the list and silently
+    // skips missing paths. Ubuntu 22.04's mesa-vulkan-drivers installs
+    // the lavapipe ICD as lvp_icd.x86_64.json (noble ships the short
+    // name), so accept both.
+    environment 'VK_ICD_FILENAMES', '/usr/share/vulkan/icd.d/lvp_icd.json:/usr/share/vulkan/icd.d/lvp_icd.x86_64.json:/usr/share/vulkan/icd.d/lvp_icd.aarch64.json'
+    environment 'LIBGL_ALWAYS_SOFTWARE', '1'
+    // LWJGL SharedLibraryLoader extracts natives from classpath JARs automatically;
+    // set extraction dir to avoid permission issues inside test sandbox
+    systemProperty 'org.lwjgl.librarypath', "${buildDir}/tmp/lwjgl-natives"
+
+    // v0.3e M1 — forward -Dpfsf.native.required=true from the Gradle CLI to
+    // the forked test JVM. GoldenParityTest reads the property and escalates
+    // "library not loaded" from skip → fail, so CI can verify that native
+    // parity tests actually executed (and weren't silently skipped).
+    def requiredSysProp = System.getProperty('pfsf.native.required')
+    if (requiredSysProp != null) {
+        systemProperty 'pfsf.native.required', requiredSysProp
+    }
+
+    // Forward -Dblockreality.native.pfsf=true so the debug test suite (L0–L6)
+    // and NativePFSFRuntime.FLAG_ENABLED can be activated from the Gradle CLI:
+    //   ./gradlew :api:test --tests "*debug.*" -Dblockreality.native.pfsf=true
+    def nativePfsfProp = System.getProperty('blockreality.native.pfsf')
+    if (nativePfsfProp != null) {
+        systemProperty 'blockreality.native.pfsf', nativePfsfProp
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  v0.3e M6 — PFSF microbenchmark harness
+// ═══════════════════════════════════════════════════════════════════
+// Runs com.blockreality.api.physics.pfsf.PfsfBenchmark (JUnit 5 test
+// gated on -Dpfsf.bench=true so it stays off during normal `./gradlew
+// test`). Writes a JSON report that scripts/pfsf_perf_gate.py compares
+// against benchmarks/baselines/<triple>.json. Acceptance:
+//   - tick50k_surrogate: native_over_java >= 1.4 (the v0.3d delivery)
+//   - every primitive's java_ns_per_op within 5% of baseline (Java-ref
+//     must not regress either — otherwise the amortisation claim is
+//     misleading).
+// Invoked from .github/workflows/perf-gate.yml.
+task pfsfBench(type: Test) {
+    description = 'Runs PFSF CPU microbenchmarks and emits build/pfsf-bench/results.json'
+    group = 'verification'
+    useJUnitPlatform()
+
+    // Run only the benchmark class; regular tests remain the province
+    // of the :test task.
+    include '**/PfsfBenchmark.class'
+    systemProperty 'pfsf.bench', 'true'
+    def outFile = layout.buildDirectory.file('pfsf-bench/results.json').get().asFile
+    systemProperty 'pfsf.bench.out', outFile.absolutePath
+
+    // Forward the Vulkan/ICD env from the main test task so native mode
+    // can load its shared library.
+    // Colon-separated — the Vulkan loader iterates the list and silently
+    // skips missing paths. Ubuntu 22.04's mesa-vulkan-drivers installs
+    // the lavapipe ICD as lvp_icd.x86_64.json (noble ships the short
+    // name), so accept both.
+    environment 'VK_ICD_FILENAMES', '/usr/share/vulkan/icd.d/lvp_icd.json:/usr/share/vulkan/icd.d/lvp_icd.x86_64.json:/usr/share/vulkan/icd.d/lvp_icd.aarch64.json'
+    environment 'LIBGL_ALWAYS_SOFTWARE', '1'
+    systemProperty 'org.lwjgl.librarypath', "${buildDir}/tmp/lwjgl-natives"
+
+    // Force a fresh JVM so HotSpot starts cold (fair timing for both
+    // modes). JMH-like fork-per-invocation posture without the plugin.
+    forkEvery = 1L
+    maxParallelForks = 1
+
+    // Echo the output path so CI can grep the log if the artifact step fails.
+    doLast {
+        if (outFile.exists()) {
+            logger.lifecycle("[pfsfBench] wrote ${outFile} (${outFile.length()} bytes)")
+        } else {
+            throw new GradleException("[pfsfBench] results.json missing: ${outFile}")
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  patchLwjglLibrary：修補 Library.class 以處理 bootstrap CL null
+// ═══════════════════════════════════════════════════════════════════
+// 根本原因：當 Library.class 透過 -Xbootclasspath/a: 被 bootstrap classloader 載入時，
+// Library.class.getClassLoader() 返回 null（bootstrap CL 無 Java 物件）。
+// Library.findResource() 直接在 null 上呼叫 .getResource() → NPE。
+//
+// 修補策略（ASM 位元組碼轉換）：
+//   在 Library.class 的所有方法中，每個 INVOKEVIRTUAL Class.getClassLoader() 指令後，
+//   插入 null check：若結果為 null，改用 Thread.currentThread().getContextClassLoader()。
+//   這樣 findResource() 返回 null（找不到資源），loadSystem() 改走 System.loadLibrary()。
+//
+// 輸出：libs/lwjgl-core-patched.jar（僅含修補後的 Library.class）
+// ═══════════════════════════════════════════════════════════════════
+// ─── Helper：生成 BRLibraryPatch 的安全載入方法（Groovy 頂層方法，可在 doLast 中呼叫）───
+// 生成位元組碼：
+//   public static void <methodName>(String arg) {
+//       try { System.<sysMethod>(arg); }
+//       catch (UnsatisfiedLinkError e) {
+//           if (e.getMessage() != null &&
+//               e.getMessage().contains("already loaded in another classloader")) return;
+//           throw e;
+//       }
+//   }
+void generateSafeLoader(ClassWriter cw, String methodName, String sysMethod) {
+    def mv = cw.visitMethod(
+        Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
+        methodName, '(Ljava/lang/String;)V', null, null)
+    mv.visitCode()
+
+    def tryStart  = new Label()
+    def tryEnd    = new Label()
+    def catchLbl  = new Label()
+    def rethrow   = new Label()
+    def done      = new Label()
+
+    mv.visitTryCatchBlock(tryStart, tryEnd, catchLbl, 'java/lang/UnsatisfiedLinkError')
+
+    mv.visitLabel(tryStart)
+    mv.visitVarInsn(Opcodes.ALOAD, 0)            // arg (name or path)
+    mv.visitMethodInsn(Opcodes.INVOKESTATIC,
+        'java/lang/System', sysMethod, '(Ljava/lang/String;)V', false)
+    mv.visitLabel(tryEnd)
+    mv.visitJumpInsn(Opcodes.GOTO, done)         // no exception → done
+
+    // catch (UnsatisfiedLinkError e)
+    mv.visitLabel(catchLbl)
+    mv.visitVarInsn(Opcodes.ASTORE, 1)           // local 1 = e
+
+    // msg = e.getMessage()
+    // ★ 修正：使用 ASTORE/ALOAD 替代 DUP，確保 rethrow 標籤的 stack 深度一致
+    //   原本 DUP 方案：
+    //     IFNULL rethrow 跳轉時 stack = [String]（DUP 殘留）→ 深度 1
+    //     IFEQ  rethrow 跳轉時 stack = []（boolean 被 IFEQ 消耗）→ 深度 0
+    //   COMPUTE_FRAMES 無法合併深度不同的 frame → 產生無效位元組碼 → jar 損壞
+    mv.visitVarInsn(Opcodes.ALOAD, 1)
+    mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL,
+        'java/lang/UnsatisfiedLinkError', 'getMessage', '()Ljava/lang/String;', false)
+    mv.visitVarInsn(Opcodes.ASTORE, 2)           // local 2 = msg  ← ASTORE 而非 DUP
+
+    // if (msg == null) rethrow  → stack 深度 0 ✓
+    mv.visitVarInsn(Opcodes.ALOAD, 2)
+    mv.visitJumpInsn(Opcodes.IFNULL, rethrow)
+
+    // if (!msg.contains("already loaded in another classloader")) rethrow
+    mv.visitVarInsn(Opcodes.ALOAD, 2)
+    mv.visitLdcInsn('already loaded in another classloader')
+    mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL,
+        'java/lang/String', 'contains', '(Ljava/lang/CharSequence;)Z', false)
+    mv.visitJumpInsn(Opcodes.IFEQ, rethrow)      // stack 深度 0 ✓
+
+    // 忽略這個錯誤（DLL 已被另一個 CL 載入，仍可正常使用）
+    mv.visitJumpInsn(Opcodes.GOTO, done)
+
+    mv.visitLabel(rethrow)                        // stack 深度 = 0，所有路徑一致 ✓
+    mv.visitVarInsn(Opcodes.ALOAD, 1)
+    mv.visitInsn(Opcodes.ATHROW)
+
+    mv.visitLabel(done)
+    mv.visitInsn(Opcodes.RETURN)
+
+    mv.visitMaxs(2, 3)   // max stack 2；max locals 3：arg(0) + e(1) + msg(2)
+    mv.visitEnd()
+}
+
+task patchLwjglLibrary {
+    def patchedJarFile = file("${rootDir}/libs/lwjgl-core-patched.jar")
+    // 永遠重新執行，避免舊版（帶有 @Override 編譯錯誤的殘留 jar）干擾
+    outputs.upToDateWhen { false }
+
+    doLast {
+        // 1. 取得原始 lwjgl-3.3.1.jar（CORE）
+        def originalJar = configurations.lwjglBootstrap.resolvedConfiguration.resolvedArtifacts
+            .find { it.name == 'lwjgl' && it.extension == 'jar' && it.classifier == null }?.file
+
+        if (originalJar == null || !originalJar.exists()) {
+            throw new GradleException("[BR-Patch] 找不到 lwjgl-3.3.1.jar（CORE）於 lwjglBootstrap 組態中")
+        }
+
+        logger.lifecycle("[BR-Patch] 正在修補 Library.class，來源：${originalJar}")
+
+        // 2. 從 jar 中提取 Library.class 位元組
+        byte[] classBytes
+        new java.util.zip.ZipFile(originalJar).withCloseable { zip ->
+            def entry = zip.getEntry('org/lwjgl/system/Library.class')
+            if (entry == null) {
+                throw new GradleException("[BR-Patch] Library.class 未在 ${originalJar} 中找到")
+            }
+            classBytes = zip.getInputStream(entry).bytes
+        }
+
+        // 3. 用 ASM 修補 Library.class
+        //
+        // 修補 A：Class.getClassLoader() null check
+        //   bootstrap CL 載入的類別 getClassLoader() 回傳 null。
+        //   在每個 INVOKEVIRTUAL Class.getClassLoader 後插入：
+        //   若結果為 null → 改用 Thread.currentThread().getContextClassLoader()
+        //
+        // 修補 B：System.loadLibrary() "already loaded in another classloader" 容忍
+        //   Minecraft 已透過 ModuleClassLoader 載入 lwjgl.dll。
+        //   當 boot classpath Library 也嘗試載入時，JVM 拋出 UnsatisfiedLinkError。
+        //   把每個 INVOKESTATIC System.loadLibrary 改為呼叫我們的
+        //   BRLibraryPatch.safeLoadLibrary()，後者會忽略「already loaded」錯誤。
+        //
+        // 修補 C：System.load() 同上，處理絕對路徑載入版本
+        def cr = new ClassReader(classBytes)
+        def cw = new ClassWriter(cr, ClassWriter.COMPUTE_FRAMES) {
+            String getCommonSuperclass(String type1, String type2) {
+                try {
+                    return super.getCommonSuperclass(type1, type2)
+                } catch (Exception ignored) {
+                    return 'java/lang/Object'
+                }
+            }
+        }
+
+        cr.accept(new ClassVisitor(Opcodes.ASM9, cw) {
+            MethodVisitor visitMethod(int access, String name, String desc,
+                                     String signature, String[] exceptions) {
+                def mv = super.visitMethod(access, name, desc, signature, exceptions)
+                return new MethodVisitor(Opcodes.ASM9, mv) {
+                    void visitMethodInsn(int opcode, String owner, String mName,
+                                        String mDesc, boolean isInterface) {
+
+                        // ── 修補 A：Class.getClassLoader() null → TCL ──────────────
+                        if (opcode == Opcodes.INVOKEVIRTUAL
+                                && 'java/lang/Class' == owner
+                                && 'getClassLoader' == mName
+                                && '()Ljava/lang/ClassLoader;' == mDesc) {
+                            super.visitMethodInsn(opcode, owner, mName, mDesc, isInterface)
+                            // stack: [ClassLoader(null?)]
+                            Label skip = new Label()
+                            super.visitInsn(Opcodes.DUP)
+                            super.visitJumpInsn(Opcodes.IFNONNULL, skip)
+                            super.visitInsn(Opcodes.POP)
+                            super.visitMethodInsn(Opcodes.INVOKESTATIC,
+                                'java/lang/Thread', 'currentThread', '()Ljava/lang/Thread;', false)
+                            super.visitMethodInsn(Opcodes.INVOKEVIRTUAL,
+                                'java/lang/Thread', 'getContextClassLoader',
+                                '()Ljava/lang/ClassLoader;', false)
+                            super.visitLabel(skip)
+                            return
+                        }
+
+                        // ── 修補 B：System.loadLibrary(name) → safeLoadLibrary(name) ──
+                        if (opcode == Opcodes.INVOKESTATIC
+                                && 'java/lang/System' == owner
+                                && 'loadLibrary' == mName
+                                && '(Ljava/lang/String;)V' == mDesc) {
+                            // 替換為 BRLibraryPatch.safeLoadLibrary(name)
+                            super.visitMethodInsn(Opcodes.INVOKESTATIC,
+                                'org/lwjgl/system/BRLibraryPatch', 'safeLoadLibrary',
+                                '(Ljava/lang/String;)V', false)
+                            return
+                        }
+
+                        // ── 修補 C：System.load(path) → safeLoad(path) ──
+                        if (opcode == Opcodes.INVOKESTATIC
+                                && 'java/lang/System' == owner
+                                && 'load' == mName
+                                && '(Ljava/lang/String;)V' == mDesc) {
+                            super.visitMethodInsn(Opcodes.INVOKESTATIC,
+                                'org/lwjgl/system/BRLibraryPatch', 'safeLoad',
+                                '(Ljava/lang/String;)V', false)
+                            return
+                        }
+
+                        super.visitMethodInsn(opcode, owner, mName, mDesc, isInterface)
+                    }
+                }
+            }
+        }, 0)
+
+        // 4. 用 ASM 生成 BRLibraryPatch.class
+        //    safeLoadLibrary(String) / safeLoad(String)：
+        //    捕獲「already loaded in another classloader」UnsatisfiedLinkError 並忽略它。
+        //    原因：Minecraft 的 ModuleClassLoader 已載入 lwjgl.dll；
+        //    boot classpath 的 Library 再次嘗試載入時 JVM 拋出此錯誤，
+        //    但 DLL 已在記憶體中可以正常使用，直接忽略即可。
+        def helperCw = new ClassWriter(ClassWriter.COMPUTE_FRAMES)
+        helperCw.visit(Opcodes.V11,
+            Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL,
+            'org/lwjgl/system/BRLibraryPatch', null,
+            'java/lang/Object', null)
+
+        // 生成 safeLoadLibrary(String name)
+        generateSafeLoader(helperCw, 'safeLoadLibrary', 'loadLibrary')
+        // 生成 safeLoad(String path)
+        generateSafeLoader(helperCw, 'safeLoad', 'load')
+        helperCw.visitEnd()
+
+        // 5. 預先生成 byte[]（在開啟 ZipOutputStream 前）
+        //    若 toByteArray() 因無效位元組碼拋出例外，不會留下損壞的 jar 檔案
+        byte[] patchedLibraryBytes = cw.toByteArray()
+        byte[] helperBytes         = helperCw.toByteArray()
+
+        // 6. 寫出 jar：修補後的 Library.class ＋ 新的 BRLibraryPatch.class
+        patchedJarFile.parentFile.mkdirs()
+        new java.util.zip.ZipOutputStream(patchedJarFile.newOutputStream()).withCloseable { zos ->
+            zos.putNextEntry(new java.util.zip.ZipEntry('org/lwjgl/system/Library.class'))
+            zos.write(patchedLibraryBytes)
+            zos.closeEntry()
+            zos.putNextEntry(new java.util.zip.ZipEntry('org/lwjgl/system/BRLibraryPatch.class'))
+            zos.write(helperBytes)
+            zos.closeEntry()
+        }
+
+        logger.lifecycle("[BR-Patch] ✓ 修補完成（Patch A + B + C）：${patchedJarFile}")
+        logger.lifecycle("[BR-Patch]   Library.class：${classBytes.length} bytes → ${patchedLibraryBytes.length} bytes")
+        logger.lifecycle("[BR-Patch]   BRLibraryPatch.class：${helperBytes.length} bytes（新增）")
+    }
+}
+
+// ═══ runClient / runServer：classpath 前置注入 ═══
+// ★ 修補策略（M8）：
+//
+//   ❌ M6（-Xbootclasspath/a:）：Java 9+ 具名模組優先，bootclasspath 被忽略。
+//   ❌ M7（--patch-module）：FG6 dev 環境中 lwjgl 可能以 unnamed module 在 classpath
+//      上存在（非 named module），--patch-module 無效。
+//
+//   ✅ M8（classpath prepend）：
+//      將 lwjgl-core-patched.jar 置於 JavaExec task.classpath 最前面。
+//      AppCL 搜尋 Library.class 時，最先找到我們的修補版本（含 Patch B/C）。
+//      修補版 Library.class 的 CL = AppCL（與 task.classpath 一致）；
+//      若 lwjgl.dll 由同一 AppCL 載入 → 同 CL → 無 "already loaded" 錯誤。
+//      若仍出現 → Patch C（safeLoad）捕獲並吞噬，Library.initialize() 靜默完成
+//      → VK 靜態初始化成功 → Vulkan RT 正常啟動。
+//
+// FG6 的 run 任務為 JavaExec 類型，afterEvaluate 確保 FG6 已建立後才修改。
+afterEvaluate {
+    def patchedJarFile = file("${rootDir}/libs/lwjgl-core-patched.jar")
+
+    // ★ PR#187 CI fix: prepend ALL jars from lwjglBootstrap, not just 'natives'.
+    // Minecraft 1.20.1 does not bundle lwjgl-vulkan, lwjgl-vma, or lwjgl-shaderc.
+    // If we only prepend the -natives jars, the pure Java bindings (like org.lwjgl.vulkan.VK)
+    // will be missing from the AppClassLoader, causing NoClassDefFoundError on startup.
+    def lwjglJars = configurations.lwjglBootstrap.resolve()
+
+    tasks.withType(JavaExec).configureEach { task ->
+        // 確保 patched jar 存在（先執行 patchLwjglLibrary）
+        task.dependsOn(patchLwjglLibrary)
+        // ★ M8 核心：patched jar 排在所有 classpath 之前
+        //   效果：AppCL 先找到 Patch B/C Library.class → 攔截 System.load/loadLibrary
+        task.classpath = files([patchedJarFile] + lwjglJars) + task.classpath
+        
+        logger.info("[BR-api] classpath prepend: ${lwjglJars.size()} LWJGL jars")
+    }
+}
+
+// v0.4 M1c — pfsf.abi.version gradle property.
+// Source of truth is L1-native/libpfsf/abi/pfsf_v1.abi.json. The value
+// is parsed once at configure time and propagated to:
+//   (a) CMake via -DPFSF_ABI_VERSION_STRING=<value>, so libpfsf
+//       compiles pfsf_abi_contract_version() returning the same string.
+//   (b) The jar manifest attribute `pfsf.abi.version`, so
+//       NativePFSFBridge can fail fast on mismatched .so/.dll/.dylib.
+// Callers can override with -Ppfsf.abi.version=<value> for testing.
+// NOTE: this block MUST stay above the `jar {}` configuration so the
+// manifest attribute below can reference the resolved value during
+// script evaluation. See v0.4 M2 CI fix.
+// PR#187 capy-ai R17: fail closed instead of defaulting to '0.0.0' on any
+// error. The old fallback silently disabled ABI enforcement because
+// NativePFSFBridge.verifyAbiContract() treats '0.0.0' on either side as
+// "skip enforcement" — so a missing / malformed / empty abi_version would
+// ship a jar with no ABI gate at all, and we would only discover it on a
+// user's box hitting UnsatisfiedLinkError at runtime. The -Ppfsf.abi.version
+// override still works for explicit cross-build scenarios; everything else
+// throws now.
+def pfsfAbiVersion = {
+    def override = findProperty('pfsf.abi.version')
+    if (override) {
+        def s = override.toString().trim()
+        if (s.isEmpty() || s == '0.0.0') {
+            throw new GradleException(
+                "[pfsf-abi] -Ppfsf.abi.version must be a non-empty semver and not '0.0.0' " +
+                "(got '${override}'); '0.0.0' disables NativePFSFBridge.verifyAbiContract")
+        }
+        return s
+    }
+    def abiJson = file("${rootDir}/../L1-native/libpfsf/abi/pfsf_v1.abi.json")
+    if (!abiJson.exists()) {
+        throw new GradleException(
+            "[pfsf-abi] ${abiJson} not found — refusing to build with ABI enforcement disabled. " +
+            "Either restore the pinned ABI manifest or pass -Ppfsf.abi.version=<x.y.z> explicitly.")
+    }
+    def parsed
+    try {
+        parsed = new groovy.json.JsonSlurper().parse(abiJson)
+    } catch (Throwable t) {
+        throw new GradleException(
+            "[pfsf-abi] failed to parse ${abiJson}: ${t.message} — refusing to build with " +
+            "ABI enforcement disabled. Fix the manifest or pass -Ppfsf.abi.version=<x.y.z>.", t)
+    }
+    def v = parsed?.abi_version?.toString()?.trim()
+    if (v == null || v.isEmpty()) {
+        throw new GradleException(
+            "[pfsf-abi] abi_version missing in ${abiJson} — refusing to build with ABI " +
+            "enforcement disabled. Fix the manifest or pass -Ppfsf.abi.version=<x.y.z>.")
+    }
+    if (v == '0.0.0') {
+        throw new GradleException(
+            "[pfsf-abi] abi_version '0.0.0' in ${abiJson} would silently disable " +
+            "NativePFSFBridge.verifyAbiContract. Refusing to build.")
+    }
+    return v
+}()
+logger.lifecycle("[pfsf-abi] pinned contract version = ${pfsfAbiVersion}")
+ext.pfsfAbiVersion = pfsfAbiVersion
+
+// ═══ 生產 JAR ═══
+jar {
+    archiveBaseName = 'block-reality-api'
+    // Native .dll/.so → mod jar（LWJGL SharedLibraryLoader 從 classpath jar 解壓）
+    // 注意：只包含二進位，不包含 Java class（避免 split-package 衝突）
+    from({
+        configurations.lwjglBootstrap
+            .filter { it.name.contains('natives') }
+            .collect { zipTree(it) }
+    }) {
+        include '**/*.dll', '**/*.so', '**/*.dylib', '**/*.jnilib'
+        include 'META-INF/native/**'
+    }
+
+    exclude 'META-INF/MANIFEST.MF'
+    exclude 'META-INF/INDEX.LIST'
+    exclude 'META-INF/*.SF'
+    exclude 'META-INF/*.DSA'
+    exclude 'META-INF/*.RSA'
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    manifest {
+        attributes([
+            'Specification-Title'     : 'block-reality-api',
+            'Specification-Vendor'    : 'BlockReality',
+            'Implementation-Title'    : project.name,
+            'Implementation-Version'  : project.jar.archiveVersion,
+            'Implementation-Vendor'   : 'BlockReality',
+            // FMLAT 必須聲明，否則 Forge 不會套用 accesstransformer.cfg；
+            // 缺少時 AT 檔案雖在 jar 內但完全被忽略。
+            'FMLAT'                   : 'accesstransformer.cfg',
+            // v0.4 M1c — pinned ABI contract version. NativePFSFBridge
+            // compares this against `pfsf_abi_contract_version()` in the
+            // loaded native lib and refuses to bind on mismatch.
+            // MUST be pfsf-abi-version (dots are illegal in Manifest keys).
+            'pfsf-abi-version'        : pfsfAbiVersion
+        ])
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+// ═══ 診斷工具 ═══
+// 用法：./gradlew :api:debugLwjgl
+// 輸出 lwjglBootstrap 解析結果和 JavaExec 任務的 boot classpath 參數
+task debugLwjgl {
+    doLast {
+        println "═══ LWJGL Bootstrap Jars ═══"
+        configurations.lwjglBootstrap.resolve().each { println "  ${it.absolutePath}" }
+        println ""
+        println "═══ JavaExec Tasks (boot classpath args) ═══"
+        tasks.withType(JavaExec).each { t ->
+            def bootArgs = t.jvmArgs.findAll { it.toString().contains('bootclasspath') }
+            println "  ${t.name}: ${bootArgs.size()} boot entries"
+            bootArgs.each { println "    ${it}" }
+        }
+    }
+}
+
+task copyToDevInstance(type: Copy, dependsOn: jar) {
+    def prismBase = System.getProperty('os.name').contains('Windows')
+        ? "${System.env.APPDATA}/PrismLauncher"
+        : "${System.getProperty('user.home')}/.local/share/PrismLauncher"
+    from jar.archiveFile
+    into "$prismBase/instances/BR-Dev/.minecraft/mods/"
+    rename { 'block-reality-api.jar' }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  v0.3c — Native library build integration (libbr_core + libblockreality_*)
+// ═══════════════════════════════════════════════════════════════════
+// Sources live under L1-native/ (umbrella). CMake configures once into
+// build/native-build from the umbrella root, which adds libbr_core +
+// libpfsf (and — once their skeletons land — libfluid / librender).
+// Artifacts stage into build/native-out under META-INF/native/<triple>/
+// so processResources picks them up and the final mod jar carries a
+// loadable blockreality_pfsf (etc.) for the host platform. The
+// cross-platform CI matrix merges triples in the release job.
+// All tasks are no-ops when the flag is off or the tool is unavailable,
+// so developer builds on machines without CMake / glslangValidator keep
+// working via the existing Java code paths.
+
+def nativeBuildRoot  = layout.buildDirectory.dir('native-build')
+def nativeOutputRoot = layout.buildDirectory.dir('native-out')
+
+def currentNativeTriple = {
+    def os   = System.getProperty('os.name').toLowerCase(java.util.Locale.ROOT)
+    def arch = System.getProperty('os.arch').toLowerCase(java.util.Locale.ROOT)
+    // MUST match com.blockreality.api.util.LibraryTriple.current() — both
+    // `aarch64` (Linux kernel / HotSpot on Linux/macOS) and `arm64` (some
+    // JDK builds on macOS/Windows) are treated as ARM64 so build-time
+    // packaging and runtime extraction agree on the folder name.
+    def arm64 = arch.contains('aarch64') || arch.contains('arm64')
+    if (os.contains('win'))    return arm64 ? 'win-arm64'   : 'win-x64'
+    if (os.contains('mac'))    return arm64 ? 'mac-arm64'   : 'mac-x64'
+    return arm64 ? 'linux-arm64' : 'linux-x64'
+}()
+
+def cmakeExecutable = {
+    def candidates = System.getProperty('os.name').toLowerCase(java.util.Locale.ROOT).contains('win')
+            ? ['cmake.exe', 'cmake']
+            : ['cmake']
+    for (c in candidates) {
+        try {
+            def p = new ProcessBuilder(c, '--version').redirectErrorStream(true).start()
+            p.waitFor(); if (p.exitValue() == 0) return c
+        } catch (Throwable ignored) {}
+    }
+    return null
+}()
+
+def glslangExecutable = {
+    def names = System.getProperty('os.name').toLowerCase(java.util.Locale.ROOT).contains('win')
+            ? ['glslangValidator.exe', 'glslangValidator', 'glslang.exe']
+            : ['glslangValidator', 'glslang']
+    for (c in names) {
+        try {
+            def p = new ProcessBuilder(c, '--version').redirectErrorStream(true).start()
+            p.waitFor(); if (p.exitValue() == 0) return c
+        } catch (Throwable ignored) {}
+    }
+    return null
+}()
+
+task nativeConfigure {
+    description = 'Configures the L1-native umbrella CMake build (v0.3c).'
+    group = 'native'
+    onlyIf { cmakeExecutable != null && Boolean.parseBoolean(findProperty('blockreality.native.build') ?: 'false') }
+
+    def buildDir  = nativeBuildRoot.get().asFile
+    def sourceDir = file("${rootDir}/../L1-native")
+
+    inputs.file file("${sourceDir}/CMakeLists.txt")
+    inputs.file file("${sourceDir}/libbr_core/CMakeLists.txt")
+    inputs.file file("${sourceDir}/libpfsf/CMakeLists.txt")
+    inputs.file file("${sourceDir}/libfluid/CMakeLists.txt")
+    inputs.file file("${sourceDir}/librender/CMakeLists.txt")
+    inputs.file file("${sourceDir}/shaders/CMakeLists.txt")
+
+    // PR#187 capy-ai R57: the CMake configure command bakes pfsfAbiVersion
+    // (derived from pfsf_v1.abi.json unless overridden) and the shader
+    // toggle into -D flags. Without declaring them as task inputs Gradle
+    // would mark nativeConfigure up-to-date even when the ABI manifest
+    // bumps minor/patch or -Pblockreality.native.shaders flips, leaving
+    // the cached CMake configure mismatched with the jar manifest
+    // pfsf.abi.version attribute and the packaged shader pipeline.
+    def abiManifest = file("${sourceDir}/libpfsf/abi/pfsf_v1.abi.json")
+    if (abiManifest.exists()) {
+        inputs.file abiManifest
+    }
+    def shadersOn = (glslangExecutable != null &&
+            Boolean.parseBoolean(findProperty('blockreality.native.shaders') ?: 'false'))
+    inputs.property 'pfsfAbiVersion', pfsfAbiVersion
+    inputs.property 'brBuildShaders', shadersOn
+    inputs.property 'native.shaders.prop', project.hasProperty('blockreality.native.shaders')
+
+    outputs.dir buildDir
+
+    doLast {
+        buildDir.mkdirs()
+        project.exec {
+            workingDir buildDir
+            commandLine cmakeExecutable, '-S', sourceDir.absolutePath, '-B', '.',
+                    '-DCMAKE_BUILD_TYPE=Release',
+                    '-DBR_BUILD_PFSF=ON',
+                    '-DBR_BUILD_FLUID=ON',
+                    '-DBR_BUILD_RENDER=ON',
+                    "-DBR_BUILD_SHADERS=${shadersOn ? 'ON' : 'OFF'}",
+                    '-DPFSF_BUILD_JNI=ON',
+                    '-DPFSF_BUILD_EXAMPLE=OFF',
+                    "-DPFSF_ABI_VERSION_STRING=${pfsfAbiVersion}"
+        }
+    }
+}
+
+// Which native targets exist in the current configuration. libbr_core is
+// a SHARED foundation pulled in via DT_NEEDED by blockreality_*; libpfsf is
+// the intermediate shared engine that blockreality_pfsf links against. Both
+// must ship next to the JVM-loaded .so so the dynamic linker's $ORIGIN
+// runpath can resolve the chain.
+def nativeTargets = ['br_core', 'pfsf', 'blockreality_pfsf', 'blockreality_fluid', 'blockreality_render']
+
+task nativeBuild(dependsOn: nativeConfigure) {
+    description = 'Builds blockreality_* shared libs and stages them under META-INF/native/<triple>/.'
+    group = 'native'
+    onlyIf { cmakeExecutable != null && Boolean.parseBoolean(findProperty('blockreality.native.build') ?: 'false') }
+
+    def buildDir  = nativeBuildRoot.get().asFile
+    def stageBase = nativeOutputRoot.get().asFile
+    def stageDir  = new File(stageBase, "META-INF/native/${currentNativeTriple}")
+
+    outputs.dir stageDir
+
+    doLast {
+        nativeTargets.each { target ->
+            project.exec {
+                workingDir buildDir
+                commandLine cmakeExecutable, '--build', '.', '--parallel', '--config', 'Release', '--target', target
+            }
+        }
+        stageDir.mkdirs()
+        // The umbrella CMake lays the artefacts out under per-target
+        // subdirectories (libbr_core/libbr_core.so, libpfsf/libpfsf.so, …),
+        // so Ant-style patterns need the **/ prefix to descend. Plain
+        // "libbr_core.so" only matches at the fileTree root and silently
+        // returns zero hits — that was what kept the staging step a no-op
+        // and made the build-native CI upload-artifact step fail with
+        // "No files were found".
+        def artifactPatterns = []
+        nativeTargets.each { t ->
+            // CMake target 'foo' produces libfoo.so/dylib on Unix, but foo.dll on Win.
+            // Also handle targets that might have 'lib' prefix even on Windows.
+            artifactPatterns << "**/lib${t}.so" << "**/lib${t}.dylib" << "**/${t}.dll" << "**/lib${t}.dll"
+        }
+        def copied = 0
+        // v0.3e M6: use fileTree(buildDir).visit to bypass path-separator issues in some Gradle versions
+        fileTree(buildDir).visit { details ->
+            if (!details.directory) {
+                def name = details.file.name
+                if (artifactPatterns.any { p -> 
+                    def pattern = p.replace('**/', '')
+                    name == pattern || name == "lib${pattern}"
+                }) {
+                    project.copy {
+                        from details.file
+                        into stageDir
+                    }
+                    copied++
+                    logger.lifecycle("[nativeBuild] staged ${name} → ${stageDir}")
+                }
+            }
+        }
+        if (copied == 0) {
+            logger.warn("[nativeBuild] no native artifacts produced in ${buildDir}")
+            // Diagnostic: list what we DID find
+            fileTree(buildDir).visit { details ->
+                if (!details.directory) logger.info("[nativeBuild] found file: ${details.relativePath}")
+            }
+        }
+    }
+}
+
+// ─── Phase F — Voxel physics validation benchmark suite ──────────────
+// Runs the 5 validation tests under com.blockreality.api.physics.validation.*:
+//   CantileverBreakTest, FloatingIslandTest, ArchBridgeTest,
+//   EnergyConservationTest, ScaleInvarianceTest.
+//
+// These are physics-concept validators (CPU-only, no GPU needed) that
+// verify analytic solutions, energy monotonicity, scale invariance, and
+// orphan detection.  Distinct from :api:test (full 144+ unit suite) and
+// :api:pfsfBench (microbenchmark timing gate).
+//
+// Invoke manually:
+//   ./gradlew :api:pfsfValidate
+//   ./gradlew :api:pfsfValidate -Dpfsf.calibration.enabled=true
+
+task pfsfValidate(type: Test) {
+    description = 'Runs Phase F voxel-physics validation benchmark suite'
+    group = 'verification'
+    useJUnitPlatform()
+
+    include '**/validation/*Test.class'
+    // 強制載入 default.json 校準（不是預設行為，明確打開）
+    systemProperty 'pfsf.calibration.enabled', 'true'
+    outputs.upToDateWhen { false }  // always run on demand
+    forkEvery = 1L
+    maxParallelForks = 1
+
+    testLogging {
+        events "passed", "skipped", "failed"
+        showStandardStreams = false
+    }
+}
+
+// ─── Stencil constants GLSL header generator (dual mode) ──────────────
+//
+// Two output modes (switched by -Pstencil.mode=):
+//   INCLUDE  (default) — generates stencil_constants.glsl; shaders use #include.
+//   INJECT   (fallback) — for Forge shader loaders that do NOT support #include
+//                         or when the CI glslang include path is broken.
+//                         The task regex-expands every
+//                         `#include "stencil_constants.glsl"` directive into an
+//                         inline `#define EDGE_P ... / #define CORNER_P ...`
+//                         block.  Shaders are written to
+//                         build/generated-shaders/pfsf/ and surfaced to
+//                         processResources so the jar ships the expanded form.
+//
+// Either mode produces byte-identical expanded values — PFSFStencilConsistencyTest
+// verifies that.
+//
+// Run manually after changing PFSFStencil constants:
+//   ./gradlew :api:generateStencilGlsl
+//   ./gradlew :api:generateStencilGlsl -Pstencil.mode=INJECT
+
+task generateStencilGlsl {
+    description = 'Regenerates stencil_constants.glsl (or injects inline) from PFSFStencil.java.'
+    group = 'build'
+
+    def mode = (findProperty('stencil.mode') ?: 'INCLUDE').toString().toUpperCase()
+    def srcFile = file("${projectDir}/src/main/java/com/blockreality/api/physics/pfsf/PFSFStencil.java")
+    def shaderDir = file("${projectDir}/src/main/resources/assets/blockreality/shaders/compute/pfsf")
+    def includeOutFile = file("${shaderDir}/stencil_constants.glsl")
+    def injectOutDir   = file("${projectDir}/build/generated-shaders/pfsf")
+
+    inputs.file srcFile
+    inputs.property 'stencil.mode', mode
+    if (mode == 'INCLUDE') {
+        outputs.file includeOutFile
+    } else {
+        outputs.dir injectOutDir
+    }
+
+    doLast {
+        def src = srcFile.text
+        def edgeMatch   = (src =~ /EDGE_P\s*=\s*([\d.]+)f/)
+        def cornerMatch = (src =~ /CORNER_P\s*=\s*([\d.]+)f/)
+        if (!edgeMatch || !cornerMatch) {
+            throw new GradleException("Could not parse EDGE_P or CORNER_P from PFSFStencil.java")
+        }
+        def edgeP   = edgeMatch[0][1]
+        def cornerP = cornerMatch[0][1]
+
+        def headerContent = """\
+// AUTO-GENERATED by :api:generateStencilGlsl — DO NOT EDIT MANUALLY.
+// Source of truth: PFSFStencil.java
+// To regenerate: ./gradlew :api:generateStencilGlsl
+#ifndef STENCIL_CONSTANTS_GLSL
+#define STENCIL_CONSTANTS_GLSL
+
+// 邊鄰居（12 個）剪力懲罰係數 — PFSFStencil.EDGE_P
+#define EDGE_P   ${edgeP}
+
+// 角鄰居（8 個）剪力懲罰係數 — PFSFStencil.CORNER_P
+#define CORNER_P ${cornerP}
+
+#endif // STENCIL_CONSTANTS_GLSL
+"""
+
+        if (mode == 'INCLUDE') {
+            includeOutFile.text = headerContent
+            logger.lifecycle("[generateStencilGlsl][INCLUDE] EDGE_P=${edgeP} CORNER_P=${cornerP} → ${includeOutFile}")
+        } else if (mode == 'INJECT') {
+            // ─── Regex source injection: rewrite each shader with inline constants ───
+            // This path is used when the runtime shader loader (Forge's bundled
+            // shader pipeline on some versions) does NOT honor #include.  We
+            // produce *expanded* shader variants under build/generated-shaders/.
+            project.delete(injectOutDir)
+            injectOutDir.mkdirs()
+
+            // Inline block that replaces `#include "stencil_constants.glsl"`:
+            def inlineBlock = """\
+// ─── BEGIN inlined from stencil_constants.glsl (INJECT mode) ───
+#ifndef STENCIL_CONSTANTS_GLSL
+#define STENCIL_CONSTANTS_GLSL
+#define EDGE_P   ${edgeP}
+#define CORNER_P ${cornerP}
+#endif
+// ─── END inlined from stencil_constants.glsl ───"""
+
+            // Also strip the GL_GOOGLE_include_directive extension line (harmless
+            // to leave in for shaderc, but clean output for non-include loaders)
+            def includePattern = ~/#extension\s+GL_GOOGLE_include_directive\s*:\s*enable\s*\n?/
+            def directivePattern = ~/#include\s+"stencil_constants\.glsl"\s*\n?/
+
+            int expanded = 0
+            fileTree(shaderDir).matching { include '**/*.comp.glsl' }.files.each { shader ->
+                def name = shader.name
+                if (name == 'stencil_constants.glsl') return   // skip the source header itself
+                def content = shader.text
+                if (content.contains('#include "stencil_constants.glsl"')) {
+                    def rewritten = content
+                        .replaceFirst(includePattern, '')
+                        .replaceFirst(directivePattern, inlineBlock + '\n')
+                    new File(injectOutDir, name).text = rewritten
+                    expanded++
+                }
+            }
+            logger.lifecycle(
+                "[generateStencilGlsl][INJECT] expanded ${expanded} shader(s) → ${injectOutDir}"
+            )
+            if (expanded == 0) {
+                logger.warn(
+                    "[generateStencilGlsl][INJECT] no shaders contained '#include \"stencil_constants.glsl\"'." +
+                    " Verify Phase D include migration completed."
+                )
+            }
+        } else {
+            throw new GradleException(
+                "Unknown stencil.mode='${mode}' — expected INCLUDE or INJECT"
+            )
+        }
+    }
+}
+
+// ─── Shader precompile (Gradle side) ────────────────────────────────
+// Runs glslangValidator over every assets/blockreality/shaders/**/*.glsl
+// and emits .spv next to the source so BRVulkanDevice.loadPrecompiledSpv
+// can skip the shaderc JIT path (~50 shaders × ~150 ms cold startup).
+// Lives in Gradle (not CMake) so non-Windows CI without the full native
+// toolchain still produces .spv that ships in the mod jar.
+
+task precompileShaders {
+    description = 'Precompiles GLSL → SPIR-V for assets/blockreality/shaders/.'
+    group = 'native'
+    onlyIf { glslangExecutable != null && Boolean.parseBoolean(findProperty('blockreality.native.shaders') ?: 'false') }
+
+    def shaderDir = file("${projectDir}/src/main/resources/assets/blockreality/shaders")
+    def outDir    = file("${projectDir}/build/generated-shaders")
+
+    inputs.dir shaderDir
+    inputs.file file("${rootDir}/../L1-native/shaders/CMakeLists.txt")
+    outputs.dir outDir
+
+    doLast {
+        // Clear the output directory first so renamed/removed .glsl sources
+        // don't leave orphaned .spv behind. Gradle only observes outDir as a
+        // whole for up-to-date, so without this step a shader renamed from
+        // foo.comp.glsl → bar.comp.glsl would ship both foo.comp.spv (stale)
+        // and bar.comp.spv on the next build until a manual clean.
+        project.delete(outDir)
+        outDir.mkdirs()
+        def n = 0
+        // Mirror L1-native/shaders/CMakeLists.txt blacklist: CI's glslang 11.x
+        // rejects rt/** (GL_NV_shader_execution_reordering, vec3[3] indexing),
+        // compute/fluid/** (recent SSBO "flat" qualifier syntax), and
+        // relax_temporal (imageStore overload). Those shaders still ship as
+        // GLSL for the Java shaderc JIT fallback path to consume.
+        fileTree(shaderDir).matching {
+            include '**/*.comp.glsl'
+            include '**/*.vert.glsl'
+            include '**/*.frag.glsl'
+            include '**/*.rgen.glsl'
+            include '**/*.rchit.glsl'
+            include '**/*.rmiss.glsl'
+            exclude 'rt/**'
+            exclude 'compute/fluid/**'
+            exclude '**/relax_temporal*'
+        }.files.each { src ->
+            def rel    = shaderDir.toPath().relativize(src.toPath()).toString()
+            def spvRel = rel.replace('.glsl', '.spv')
+            def dst    = new File(outDir, spvRel)
+            dst.parentFile.mkdirs()
+            // -O (SPIR-V optimization) is omitted on purpose: Ubuntu 22.04's
+            // glslang-tools 11.x — what the CI runners ship — does not accept
+            // the flag. The CMake-driven shader pipeline under
+            // L1-native/shaders/CMakeLists.txt already drops -O for the same
+            // reason; matching the Gradle task keeps both paths in step. Unopt
+            // SPIR-V is still valid; spirv-opt can be layered on later if a
+            // runner provides a newer toolchain.
+            project.exec {
+                // -I shaderDir: allows shaders to use #include "stencil_constants.glsl"
+                commandLine glslangExecutable, '--target-env', 'vulkan1.2', '-V',
+                            '-I', shaderDir.absolutePath,
+                            '-o', dst.absolutePath, src.absolutePath
+            }
+            n++
+        }
+        logger.lifecycle("[precompileShaders] compiled ${n} shader(s) → ${outDir}")
+    }
+}
+
+// Surface staged natives to processResources so the final jar carries
+// them under META-INF/native/<triple>/. Two entry points:
+//   (1) `-Pblockreality.native.build=true` — local/full build, runs CMake
+//       via nativeBuild and then stages the fresh output.
+//   (2) `-Pblockreality.package.stagedNatives=true` — release workflow,
+//       where the per-triple binaries are downloaded and pre-staged into
+//       build/native-out/META-INF/native/<triple>/ BEFORE gradle runs.
+//       The jar must then include them without reinvoking CMake.
+// Neither flag is on in normal dev builds, so processResources is
+// unchanged there.
+if (cmakeExecutable != null && Boolean.parseBoolean(findProperty('blockreality.native.build') ?: 'false')) {
+    processResources {
+        dependsOn nativeBuild
+        from(nativeOutputRoot) { include 'META-INF/native/**' }
+    }
+} else if (Boolean.parseBoolean(findProperty('blockreality.package.stagedNatives') ?: 'false')) {
+    processResources {
+        from(nativeOutputRoot) { include 'META-INF/native/**' }
+    }
+}
+
+// Surface precompiled SPIR-V to processResources so the jar ships .spv
+// next to the .glsl sources — Java loader uses .spv when present,
+// glsl-shaderc JIT path remains as fallback.
+if (glslangExecutable != null && Boolean.parseBoolean(findProperty('blockreality.native.shaders') ?: 'false')) {
+    processResources {
+        dependsOn precompileShaders
+        from("${projectDir}/build/generated-shaders") {
+            into 'assets/blockreality/shaders'
+        }
+    }
+}
+
+// v0.3e M1 — when the native build is active, wire test's java.library.path
+// to the freshly-staged libblockreality_pfsf so System.loadLibrary succeeds
+// in the forked JVM. Declared here (after nativeBuild / currentNativeTriple)
+// because the `test {}` block near the top of this file is configured before
+// those symbols exist.
+//
+// v0.3e M6 — same wiring for pfsfBench so the perf-gate workflow can
+// compare native vs Java ref on a runner with CMake + Vulkan SDK.
+if (cmakeExecutable != null && Boolean.parseBoolean(findProperty('blockreality.native.build') ?: 'false')) {
+    def stageDir = new File(nativeOutputRoot.get().asFile,
+                            "META-INF/native/${currentNativeTriple}")
+    def existing = System.getProperty('java.library.path', '')
+    def joined   = existing.isEmpty()
+            ? stageDir.absolutePath
+            : "${stageDir.absolutePath}${File.pathSeparator}${existing}"
+
+    tasks.named('test').configure {
+        dependsOn nativeBuild
+        systemProperty 'java.library.path', joined
+    }
+    tasks.named('pfsfBench').configure {
+        dependsOn nativeBuild
+        systemProperty 'java.library.path', joined
+    }
+}

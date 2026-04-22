@@ -1,0 +1,176 @@
+# BIFROST ML Trainer — One-Click Launcher (PowerShell)
+# Usage: Right-click → Run with PowerShell
+#   or: powershell -ExecutionPolicy Bypass -File start-trainer.ps1
+
+$ErrorActionPreference = "SilentlyContinue"
+$Host.UI.RawUI.WindowTitle = "BIFROST ML Trainer"
+
+Write-Host ""
+Write-Host "  BIFROST ML - Block Reality AI Trainer" -ForegroundColor Cyan
+Write-Host "  =====================================" -ForegroundColor Cyan
+Write-Host ""
+
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$BrmlDir = Join-Path (Get-Item $ScriptDir).Parent.FullName "ml\brml"
+$VenvDir = Join-Path $BrmlDir ".venv"
+
+# ── Check Python ──
+$PyCmd = $null
+foreach ($cmd in @("python", "python3", "py")) {
+    $found = Get-Command $cmd -ErrorAction SilentlyContinue
+    if ($found) {
+        $ver = & $cmd -c "import sys; print(sys.version_info.major * 100 + sys.version_info.minor)" 2>$null
+        if ([int]$ver -ge 310) {
+            $PyCmd = $cmd
+            break
+        }
+    }
+}
+
+if (-not $PyCmd) {
+    Write-Host "  [ERROR] Python 3.10+ not found." -ForegroundColor Red
+    Write-Host "  Install from https://python.org"
+    Write-Host "  Check 'Add Python to PATH' during install."
+    Write-Host ""
+    Read-Host "  Press Enter to exit"
+    exit 1
+}
+
+$PyVer = & $PyCmd --version 2>&1
+Write-Host "  Python: $PyVer"
+
+# ── Create venv ──
+$ActivateScript = Join-Path $VenvDir "Scripts\Activate.ps1"
+if (-not (Test-Path $ActivateScript)) {
+    Write-Host "  Creating virtual environment..."
+    & $PyCmd -m venv $VenvDir
+    if (-not (Test-Path $ActivateScript)) {
+        Write-Host "  [ERROR] Failed to create venv." -ForegroundColor Red
+        Read-Host "  Press Enter to exit"
+        exit 1
+    }
+}
+
+& $ActivateScript
+Write-Host "  Venv: $VenvDir"
+Write-Host ""
+
+# ── Install deps ──
+Write-Host "  [1/3] Upgrading pip..."
+& pip install --quiet --upgrade pip 2>$null
+
+Write-Host "  [2/3] Installing core dependencies..."
+
+# JAX on Windows: use jax[cpu] to get jax+jaxlib together
+$depsOrdered = @(
+    "numpy",
+    "scipy",
+    "tqdm",
+    "jax[cpu]",
+    "optax"
+)
+
+$failedDeps = @()
+foreach ($dep in $depsOrdered) {
+    Write-Host "    Installing $dep..." -NoNewline
+    $output = & pip install $dep 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host " FAILED" -ForegroundColor Red
+        $errorLines = ($output | Select-Object -Last 3) -join "`n"
+        Write-Host "      $errorLines" -ForegroundColor Yellow
+        $failedDeps += $dep
+    } else {
+        Write-Host " OK" -ForegroundColor Green
+    }
+}
+
+# Flax special handling: orbax-checkpoint (flax dependency) has >260 char paths
+# that crash pip on Windows. Install flax --no-deps then add minimal deps.
+Write-Host "    Installing flax..." -NoNewline
+$output = & pip install flax --no-deps 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Host " FAILED" -ForegroundColor Red
+    $failedDeps += "flax"
+} else {
+    Write-Host " OK" -ForegroundColor Green
+}
+# Flax's actual runtime deps (without orbax)
+foreach ($sub in @("msgpack", "rich", "typing_extensions", "PyYAML")) {
+    & pip install --quiet $sub 2>$null
+}
+
+& pip install --quiet -e $BrmlDir --no-deps 2>$null
+
+# Report critical missing deps
+$criticalMissing = @()
+foreach ($dep in @("jax", "flax")) {
+    & $PyCmd -c "import $dep" 2>$null
+    if ($LASTEXITCODE -ne 0) { $criticalMissing += $dep }
+}
+
+if ($criticalMissing.Count -gt 0) {
+    Write-Host ""
+    Write-Host "  [WARNING] Missing: $($criticalMissing -join ', ')" -ForegroundColor Red
+    Write-Host "  Training will not work without these."
+    Write-Host "  Try manually: pip install $($criticalMissing -join ' ')" -ForegroundColor Yellow
+    Write-Host "  Or: pip install jax[cpu] flax" -ForegroundColor Yellow
+    Write-Host ""
+}
+
+Write-Host "  [3/3] Installing UI (Gradio)..."
+& pip install --quiet gradio 2>$null
+
+$HasGradio = $false
+& $PyCmd -c "import gradio" 2>$null
+if ($LASTEXITCODE -eq 0) { $HasGradio = $true }
+
+# Verify core
+& $PyCmd -c "import numpy, scipy" 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
+    Write-Host "  [ERROR] Core dependencies failed to install." -ForegroundColor Red
+    Write-Host "  Try manually: cd ml\brml; pip install numpy scipy"
+    Read-Host "  Press Enter to exit"
+    exit 1
+}
+
+$GradioStatus = if ($HasGradio) { "yes" } else { "no - using terminal UI" }
+Write-Host ""
+Write-Host "  Ready! (Gradio: $GradioStatus)" -ForegroundColor Green
+Write-Host ""
+
+# ── Launch ──
+$env:XLA_PYTHON_CLIENT_PREALLOCATE="false"
+$env:XLA_PYTHON_CLIENT_MEM_FRACTION="0.85"
+$env:NVIDIA_TF32_OVERRIDE="1"
+
+Set-Location $BrmlDir
+
+if ($args -contains "--tui") {
+    Write-Host "  Starting terminal UI..."
+    Write-Host ""
+    & $PyCmd -m brml.ui.tui
+}
+elseif ($args -contains "--auto") {
+    Write-Host "  Starting auto-train..."
+    Write-Host ""
+    $passArgs = $args | Where-Object { $_ -ne "--auto" }
+    & $PyCmd -m brml.pipeline.auto_train @passArgs
+}
+elseif ($HasGradio) {
+    Write-Host "  Starting web UI -> http://localhost:7860"
+    Write-Host "  (Ctrl+C to stop)"
+    Write-Host ""
+    & $PyCmd -m brml.ui.web_ui
+}
+else {
+    Write-Host "  Starting terminal UI..."
+    Write-Host ""
+    & $PyCmd -m brml.ui.tui
+}
+
+Write-Host ""
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  Exited with code $LASTEXITCODE" -ForegroundColor Yellow
+}
+Read-Host "  Press Enter to close"
