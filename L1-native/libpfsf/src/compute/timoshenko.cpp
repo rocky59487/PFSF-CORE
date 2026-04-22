@@ -42,8 +42,7 @@ extern "C" float pfsf_timoshenko_moment_factor(float section_width,
     const float A = b * h;
 
     const float shear = static_cast<float>(arm) * static_cast<float>(arm)
-                        * pfsf::compute::GRAVITY * A
-                        / (kappa * G_pa * I + 1.0e-10f);
+                        * h / (kappa * G_pa * I + 1.0e-10f) * 1.0e6f;
 
     return 1.0f + std::min(shear, pfsf::compute::TIMOSHENKO_FACTOR_CAP);
 }

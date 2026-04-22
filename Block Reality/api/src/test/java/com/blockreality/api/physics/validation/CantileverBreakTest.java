@@ -105,7 +105,7 @@ class CantileverBreakTest {
         float[] phi = VoxelPhysicsCpuReference.solve(dom, 1.0f, 500);
         // 所有 ANCHOR 體素 φ 必為 0
         for (int i = 0; i < dom.N(); i++) {
-            if (dom.type[i] == VoxelPhysicsCpuReference.TYPE_ANCHOR) {
+            if (dom.type()[i] == VoxelPhysicsCpuReference.TYPE_ANCHOR) {
                 assertEquals(0f, phi[i], 1e-6f, "anchor voxel i=" + i + " 的 φ 必為 0");
             }
         }

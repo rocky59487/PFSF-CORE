@@ -31,7 +31,9 @@ public final class ThermalAugBinder extends AbstractAugBinder {
 
     @Override
     protected boolean isActive() {
-        return ModuleRegistry.getThermalManager() != null;
+        // NoOpThermalManager.INSTANCE 是倍位符（功能停用），不視為真實的 manager
+        IThermalManager thermal = ModuleRegistry.getThermalManager();
+        return thermal != null && !(thermal instanceof com.blockreality.api.spi.NoOpThermalManager);
     }
 
     @Override

@@ -28,12 +28,12 @@ class ArchBridgeTest {
     void archGeometryHasAnchorsAtBothFootings() {
         int R = 8;
         Domain dom = VoxelPhysicsCpuReference.buildSemiArch(R, 1);
-        int cx = dom.Lx / 2;
-        int iL = (cx - R) + dom.Lx * (0 + dom.Ly * 0);
-        int iR = (cx + R) + dom.Lx * (0 + dom.Ly * 0);
-        assertEquals(VoxelPhysicsCpuReference.TYPE_ANCHOR, dom.type[iL],
+        int cx = dom.Lx() / 2;
+        int iL = (cx - R) + dom.Lx() * (0 + dom.Ly() * 0);
+        int iR = (cx + R) + dom.Lx() * (0 + dom.Ly() * 0);
+        assertEquals(VoxelPhysicsCpuReference.TYPE_ANCHOR, dom.type()[iL],
             "左端點必為 anchor");
-        assertEquals(VoxelPhysicsCpuReference.TYPE_ANCHOR, dom.type[iR],
+        assertEquals(VoxelPhysicsCpuReference.TYPE_ANCHOR, dom.type()[iR],
             "右端點必為 anchor");
     }
 
@@ -78,18 +78,18 @@ class ArchBridgeTest {
         Domain dom = VoxelPhysicsCpuReference.buildSemiArch(R, 1);
         float[] phi = VoxelPhysicsCpuReference.solve(dom, 1.0f, 2000);
 
-        int cx = dom.Lx / 2;
+        int cx = dom.Lx() / 2;
         // 對稱性：cx 左右對應 voxel 的 φ 應大約相等
         int mismatchCount = 0;
         for (int z = 0; z <= R; z++) {
             for (int dx = 1; dx <= R; dx++) {
-                int iL = (cx - dx) + dom.Lx * (0 + dom.Ly * z);
-                int iR = (cx + dx) + dom.Lx * (0 + dom.Ly * z);
+                int iL = (cx - dx) + dom.Lx() * (0 + dom.Ly() * z);
+                int iR = (cx + dx) + dom.Lx() * (0 + dom.Ly() * z);
                 if (iL < 0 || iR >= dom.N()) continue;
-                if (dom.type[iL] != VoxelPhysicsCpuReference.TYPE_SOLID &&
-                    dom.type[iL] != VoxelPhysicsCpuReference.TYPE_ANCHOR) continue;
-                if (dom.type[iR] != VoxelPhysicsCpuReference.TYPE_SOLID &&
-                    dom.type[iR] != VoxelPhysicsCpuReference.TYPE_ANCHOR) continue;
+                if (dom.type()[iL] != VoxelPhysicsCpuReference.TYPE_SOLID &&
+                    dom.type()[iL] != VoxelPhysicsCpuReference.TYPE_ANCHOR) continue;
+                if (dom.type()[iR] != VoxelPhysicsCpuReference.TYPE_SOLID &&
+                    dom.type()[iR] != VoxelPhysicsCpuReference.TYPE_ANCHOR) continue;
                 float vL = phi[iL], vR = phi[iR];
                 float relative = Math.abs(vL - vR) / (Math.abs(vL) + Math.abs(vR) + 1e-6f);
                 if (relative > 0.05f) mismatchCount++;

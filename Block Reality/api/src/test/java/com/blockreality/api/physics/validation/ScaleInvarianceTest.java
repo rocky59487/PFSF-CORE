@@ -65,8 +65,8 @@ class ScaleInvarianceTest {
             float[] phi = VoxelPhysicsCpuReference.solve(dom, 1.0f, L * 20);
             float[] d   = new float[dom.N()];
             float[] h   = new float[dom.N()]; java.util.Arrays.fill(h, 1f);
-            finalEnergies[k] = ev.evaluate(phi, d, dom.sigma, dom.source, h,
-                                           dom.Lx, dom.Ly, dom.Lz, calib);
+            finalEnergies[k] = ev.evaluate(phi, d, dom.sigma(), dom.source(), h,
+                                           dom.Lx(), dom.Ly(), dom.Lz(), calib);
         }
         // 所有 E 必為正且收斂（量級應與 N 相當）
         for (double e : finalEnergies) {

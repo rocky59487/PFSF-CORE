@@ -46,7 +46,8 @@ layout(set = 0, binding = 4) readonly buffer Source { float source[];  };
 layout(set = 0, binding = 5) readonly buffer Type   { uint  vtype[];   };
 layout(set = 0, binding = 6) buffer PartialSums { float partialSums[]; };
 layout(set = 0, binding = 7) readonly buffer Reduction { float reductionBuf[]; };
-layout(set = 0, binding = 8) readonly buffer Cond { float sigma[]; };\nlayout(set = 0, binding = 9) readonly buffer InvDiag { float invDiag6[]; };
+layout(set = 0, binding = 8) readonly buffer Cond { float sigma[]; };
+layout(set = 0, binding = 9) readonly buffer InvDiag { float invDiag6[]; };
 
 shared float sdata[256 + 32];
 

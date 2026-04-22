@@ -120,15 +120,25 @@ public final class PFSFEnergyRecorder {
             }
 
             double dev = total - meanTotal;
-            // 方差先算（用舊均值，新樣本的殘差）避免後續更新污染
+
+            // ── Z-score 必須用舊 sigma（更新前）計算 ──
+            // 標準 EMA 異常偵測語義：用歷史分布判斷當前事件。
+            // 若 sigmaOld 極小（方差尚未積累），Z 沒有統計意義 → 不告警。
+            // MIN_SIGMA 對應約 0.01% 能量波動，低於此值的 sigma 表示歷史過度平穩。
+            final double MIN_SIGMA = 1e-6;
+            double sigmaOld = Math.sqrt(varTotal + VAR_EPS);
+            double z;
+            if (tickCount <= WARMUP_TICKS || sigmaOld < MIN_SIGMA) {
+                z = 0.0; // 預熱期或方差不足時不告警
+            } else {
+                z = dev / sigmaOld;
+            }
+
+            // 再用當前殘差更新方差/均值（Welford EMA）
             varTotal  = EMA_ALPHA * dev * dev + (1.0 - EMA_ALPHA) * varTotal;
             meanTotal = EMA_ALPHA * total    + (1.0 - EMA_ALPHA) * meanTotal;
 
-            if (tickCount <= WARMUP_TICKS) {
-                return 0.0; // 預熱期不告警
-            }
-            double sigma = Math.sqrt(varTotal + VAR_EPS);
-            return dev / sigma;
+            return z;
         }
 
         public double mean()       { return meanTotal; }

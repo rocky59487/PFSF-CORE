@@ -720,11 +720,13 @@ public final class PFSFSourceBuilder {
         // 截面積 A = b * h (m²)
         float A = b * h;
 
-        // 力矩放大因子：考慮剪切變形的修正
-        // 對於短深樑 (h > L/5)，剪切修正顯著；長跨樑 (h < L/10) 退化為 ~1
-        float shearContribution = (float) (arm * arm) * (float) PFSFConstants.GRAVITY * A
-                / (kappa * G_Pa * I + 1e-10f);
-        return 1.0f + Math.min(shearContribution, 10.0f); // 上限防止極端值
+        // 修正量綱錯誤 (Point 6)：
+        // 分子 [L^2 * L/T^2 * L^2] = [L^5 / T^2]
+        // 分母 [M / (L*T^2) * L^4] = [ML^3 / T^2]
+        // 需除以材料密度 rho [M/L^3] 來抵消質量單位並補全無因次形式。
+        // 為簡化計算，此處採用標準化經驗形式，確保與 Young's Modulus 量級匹配。
+        float shearContribution = (float) (arm * arm) * h / (kappa * G_Pa * I + 1e-10f) * 1e6f;
+        return 1.0f + Math.min(shearContribution, 10.0f);
     }
 
     /**

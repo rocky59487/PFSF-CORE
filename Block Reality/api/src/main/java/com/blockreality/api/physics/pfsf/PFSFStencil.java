@@ -1,82 +1,77 @@
 package com.blockreality.api.physics.pfsf;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 26-connectivity stencil 的單一真值來源（SSOT）。
- *
- * <p>EDGE_P 與 CORNER_P 是整個 PFSF 管線唯一允許修改這兩個值的地方。
- * 所有 GLSL shader 透過 {@code #include "stencil_constants.glsl"} 讀取，
- * 該檔由 Gradle task {@code generateStencilGlsl} 從本 class 自動產生。
- *
- * <h2>26-connectivity 鄰居分類</h2>
- * <ul>
- *   <li>面鄰居（6 個）：weight = σ_ij，權重乘子 = 1.0</li>
- *   <li>邊鄰居（12 個）：weight = sqrt(σ_i × σ_j) × EDGE_P</li>
- *   <li>角鄰居（8 個）：weight = cbrt(σ_x × σ_y × σ_z) × CORNER_P</li>
- * </ul>
- *
- * <h2>四性質保證</h2>
- * <ul>
- *   <li>Symmetry：w_ij = w_ji（幾何平均對稱）</li>
- *   <li>Positivity：EDGE_P, CORNER_P &gt; 0 → w_ij ≥ 0</li>
- *   <li>Locality：僅對 26-conn 鄰居呼叫（由呼叫者保證）</li>
- *   <li>Monotonicity：損傷 d 上升 → EdgeWeight 單調下降（見 DefaultEdgeWeight）</li>
- * </ul>
- *
- * @see PFSFConstants#SHEAR_EDGE_PENALTY deprecated，請改用本 class
+ * v0.4d: 基於學術界 Shinozaki-Oono Isotropic Laplacian 權重對齊。
+ * 
+ * <p>權重設計原則：
+ * - Face (距離 1.0): 1.0 (基數)
+ * - Edge (距離 √2): 0.5 (Shinozaki-Oono 標準)
+ * - Corner (距離 √3): 0.1666667 (1/6, Shinozaki-Oono 標準)
+ * 
+ * <p>此權重組合保證了 3D 拉普拉斯算子的二階各向同性，能有效防止相場斷裂
+ * 在對角線方向產生數值鋸齒（Grid Artifacts）。
  */
 public final class PFSFStencil {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger("PFSF-Stencil");
+    private static final Path CALIBRATION_PATH = Paths.get("research/pfsf_calibration.json");
 
     private PFSFStencil() {}
 
     // ─── 連通性拓撲 ───────────────────────────────────────────────
 
-    /** 面鄰居數 */
     public static final int FACE_COUNT   = 6;
-
-    /** 邊鄰居數（共享一條邊的對角格，12 個） */
     public static final int EDGE_COUNT   = 12;
-
-    /** 角鄰居數（共享一個頂點，8 個） */
     public static final int CORNER_COUNT = 8;
-
-    /** 26-conn 鄰居總數 */
     public static final int NEIGHBOR_COUNT = FACE_COUNT + EDGE_COUNT + CORNER_COUNT;
 
-    // ─── 剪力懲罰係數（SSOT）──────────────────────────────────────
+    // ─── 剪力懲罰係數 (學術真值：Shinozaki-Oono) ─────────────────────
 
-    /**
-     * 邊鄰居（12 個）剪力懲罰係數。
-     *
-     * <p>對應 GLSL {@code #define EDGE_P} in stencil_constants.glsl。
-     * 修改此值後必須執行 {@code ./gradlew :api:generateStencilGlsl} 重新產生 GLSL header。
-     */
-    public static final float EDGE_P   = 0.35f;
+    public static float EDGE_P   = 0.5f;
+    public static float CORNER_P = 0.1666667f;
 
-    /**
-     * 角鄰居（8 個）剪力懲罰係數。
-     *
-     * <p>對應 GLSL {@code #define CORNER_P} in stencil_constants.glsl。
-     */
-    public static final float CORNER_P = 0.15f;
+    static {
+        loadCalibration();
+    }
 
-    // ─── 26-connectivity 鄰居偏移量（dx, dy, dz）────────────────
+    public static void loadCalibration() {
+        if (!Files.exists(CALIBRATION_PATH)) {
+            return;
+        }
+        try {
+            String content = Files.readString(CALIBRATION_PATH, StandardCharsets.UTF_8);
+            EDGE_P = parseJsonFloat(content, "EDGE_P", EDGE_P);
+            CORNER_P = parseJsonFloat(content, "CORNER_P", CORNER_P);
+            LOGGER.info("[PFSF-Stencil] Loaded override from JSON: EDGE_P={}, CORNER_P={}", EDGE_P, CORNER_P);
+        } catch (Exception e) {
+            // fallback to hardcoded Shinozaki-Oono
+        }
+    }
 
-    /**
-     * 所有 26 個鄰居的相對座標偏移量，順序為：
-     * [0..5]   6 個面鄰居（+x, -x, +y, -y, +z, -z）
-     * [6..17]  12 個邊鄰居（XY 平面 4, XZ 平面 4, YZ 平面 4）
-     * [18..25] 8 個角鄰居（所有 ±1,±1,±1 組合）
-     */
+    private static float parseJsonFloat(String json, String key, float def) {
+        Pattern p = Pattern.compile("\"" + key + "\":\\s*([\\d.]+)");
+        Matcher m = p.matcher(json);
+        if (m.find()) return Float.parseFloat(m.group(1));
+        return def;
+    }
+
     public static final int[][] NEIGHBOR_OFFSETS = {
         // 面鄰居（6）
         { 1,  0,  0}, {-1,  0,  0},
         { 0,  1,  0}, { 0, -1,  0},
-        { 0,  0,  1}, { 0,  0, -1},
+        { 0,  0,  1}, { 0, -0, -1},
         // 邊鄰居 XY（4）
         { 1,  1,  0}, { 1, -1,  0}, {-1,  1,  0}, {-1, -1,  0},
         // 邊鄰居 XZ（4）
@@ -88,44 +83,33 @@ public final class PFSFStencil {
         {-1,  1,  1}, {-1,  1, -1}, {-1, -1,  1}, {-1, -1, -1},
     };
 
-    /**
-     * 每個鄰居的 stencil 懲罰乘子，與 {@link #NEIGHBOR_OFFSETS} 一一對應。
-     * 面 = 1.0f，邊 = EDGE_P，角 = CORNER_P。
-     */
-    public static final float[] NEIGHBOR_PENALTIES;
-
-    static {
-        NEIGHBOR_PENALTIES = new float[NEIGHBOR_COUNT];
-        for (int i = 0; i < FACE_COUNT; i++)            NEIGHBOR_PENALTIES[i]              = 1.0f;
-        for (int i = FACE_COUNT; i < FACE_COUNT + EDGE_COUNT; i++) NEIGHBOR_PENALTIES[i]   = EDGE_P;
-        for (int i = FACE_COUNT + EDGE_COUNT; i < NEIGHBOR_COUNT; i++) NEIGHBOR_PENALTIES[i] = CORNER_P;
+    public static float[] getNeighborPenalties() {
+        float[] penalties = new float[NEIGHBOR_COUNT];
+        for (int i = 0; i < FACE_COUNT; i++)            penalties[i]              = 1.0f;
+        for (int i = FACE_COUNT; i < FACE_COUNT + EDGE_COUNT; i++) penalties[i]   = EDGE_P;
+        for (int i = FACE_COUNT + EDGE_COUNT; i < NEIGHBOR_COUNT; i++) penalties[i] = CORNER_P;
+        return penalties;
     }
 
-    // ─── GLSL Header 產生 ─────────────────────────────────────────
-
-    /**
-     * 將 stencil 常數寫出為 GLSL {@code #define} header 檔。
-     *
-     * <p>由 Gradle task {@code generateStencilGlsl} 呼叫；通常不需手動呼叫。
-     *
-     * @param out 目標路徑（通常為 stencil_constants.glsl 在 resources 中的位置）
-     */
     public static void writeGlslHeader(Path out) throws IOException {
+        loadCalibration();
         String content =
             "// AUTO-GENERATED by :api:generateStencilGlsl — DO NOT EDIT MANUALLY.\n" +
-            "// Source of truth: PFSFStencil.java\n" +
-            "// To regenerate: ./gradlew :api:generateStencilGlsl\n" +
+            "// Source of truth: PFSFStencil.java (Aligned with Shinozaki-Oono Isotropic Model)\n" +
             "#ifndef STENCIL_CONSTANTS_GLSL\n" +
             "#define STENCIL_CONSTANTS_GLSL\n" +
             "\n" +
-            "// 邊鄰居（12 個）剪力懲罰係數 — PFSFStencil.EDGE_P\n" +
             "#define EDGE_P   " + EDGE_P + "\n" +
-            "\n" +
-            "// 角鄰居（8 個）剪力懲罰係數 — PFSFStencil.CORNER_P\n" +
             "#define CORNER_P " + CORNER_P + "\n" +
             "\n" +
-            "#endif // STENCIL_CONSTANTS_GLSL\n";
+            "#endif\n";
         Files.createDirectories(out.getParent());
         Files.writeString(out, content, StandardCharsets.UTF_8);
+    }
+
+    public static void main(String[] args) throws IOException {
+        if (args.length > 0) {
+            writeGlslHeader(Paths.get(args[0]));
+        }
     }
 }

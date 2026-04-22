@@ -81,8 +81,7 @@ public final class VulkanComputeContext {
     private static long maxStorageBufferRange;
     private static long minStorageBufferOffsetAlignment = 256; // safe fallback (actual value queried at init)
 
-    // Shared with BRVulkanDevice?
-    private static boolean sharedDevice = false;
+
 
     private VulkanComputeContext() {}
 
@@ -102,17 +101,11 @@ public final class VulkanComputeContext {
         LOGGER.info("[PFSF] Initializing Vulkan Compute context...");
 
         try {
-            // ★ DEBUG: Force standalone init for isolation
-            if (false && tryShareBRVulkanDevice()) {
-                sharedDevice = true;
-                LOGGER.info("[PFSF] Shared Vulkan device with BRVulkanDevice: {}", deviceName);
+            if (initStandalone()) {
+                LOGGER.info("[PFSF] Standalone Vulkan compute device: {}", deviceName);
             } else {
-                if (initStandalone()) {
-                    LOGGER.info("[PFSF] Standalone Vulkan compute device: {}", deviceName);
-                } else {
-                    LOGGER.error("[PFSF] Vulkan standalone init returned false — 物理引擎將無法運作");
-                    return;
-                }
+                LOGGER.error("[PFSF] Vulkan standalone init returned false — 物理引擎將無法運作");
+                return;
             }
 
             // Create command pool
@@ -144,42 +137,6 @@ public final class VulkanComputeContext {
         }
     }
 
-    /**
-     * 嘗試複用 BRVulkanDevice 的 Vulkan 裝置。
-     *
-     * <p>純反射實作 — 不得直接引用 BRVulkanDevice 類別，因為該類別標記
-     * {@code @OnlyIn(Dist.CLIENT)}，在專用伺服器上不存在。即使用
-     * {@code Class.forName()} 做防護，編譯器生成的 import 仍會觸發
-     * class loading cascade → {@code ExceptionInInitializerError}。</p>
-     */
-    private static boolean tryShareBRVulkanDevice() {
-        try {
-            Class<?> brVkDev = Class.forName("com.blockreality.api.client.render.rt.BRVulkanDevice");
-
-            boolean isInit = (boolean) brVkDev.getMethod("isInitialized").invoke(null);
-            boolean isRT   = (boolean) brVkDev.getMethod("isRTSupported").invoke(null);
-            if (!isInit || !isRT) return false;
-
-            vkInstanceObj       = (VkInstance)       brVkDev.getMethod("getVkInstanceObj").invoke(null);
-            vkPhysicalDeviceObj = (VkPhysicalDevice) brVkDev.getMethod("getVkPhysicalDeviceObj").invoke(null);
-            vkDeviceObj         = (VkDevice)         brVkDev.getMethod("getVkDeviceObj").invoke(null);
-            computeQueueObj     = (VkQueue)          brVkDev.getMethod("getVkQueueObj").invoke(null);
-            vkInstance          = (long) brVkDev.getMethod("getVkInstance").invoke(null);
-            vkDevice            = (long) brVkDev.getMethod("getVkDevice").invoke(null);
-            vkPhysicalDevice    = (long) brVkDev.getMethod("getVkPhysicalDevice").invoke(null);
-            computeQueue        = (long) brVkDev.getMethod("getVkQueue").invoke(null);
-            computeQueueFamily  = (int)  brVkDev.getMethod("getQueueFamilyIndex").invoke(null);
-            deviceName          = (String) brVkDev.getMethod("getDeviceName").invoke(null);
-            return true;
-        } catch (ClassNotFoundException | NoClassDefFoundError e) {
-            // Expected on dedicated server — BRVulkanDevice not present
-            LOGGER.debug("[PFSF] BRVulkanDevice not available (server-side), standalone init");
-            return false;
-        } catch (Throwable e) {
-            LOGGER.debug("[PFSF] Cannot share BRVulkanDevice: {}", e.toString());
-            return false;
-        }
-    }
 
     /**
      * 獨立建立 compute-only Vulkan device。
@@ -489,9 +446,6 @@ public final class VulkanComputeContext {
 
     /** 取得 GPU 裝置名稱（供 Crash Reporter 使用）。 */
     public static String getDeviceName() { return deviceName; }
-
-    /** 是否使用了與 BRVulkanDevice 共享的裝置（Crash Reporter 診斷）。 */
-    public static boolean isSharedDevice() { return sharedDevice; }
 
     /** PFSF Vulkan Compute 是否成功初始化。 */
     public static boolean isComputeSupported() { return computeSupported; }
@@ -1084,15 +1038,13 @@ public final class VulkanComputeContext {
                 vmaAllocator = 0;
             }
 
-            if (!sharedDevice) {
-                if (vkDevice != 0) {
-                    vkDestroyDevice(vkDeviceObj, null);
-                    vkDevice = 0;
-                }
-                if (vkInstance != 0) {
-                    vkDestroyInstance(vkInstanceObj, null);
-                    vkInstance = 0;
-                }
+            if (vkDevice != 0) {
+                vkDestroyDevice(vkDeviceObj, null);
+                vkDevice = 0;
+            }
+            if (vkInstance != 0) {
+                vkDestroyInstance(vkInstanceObj, null);
+                vkInstance = 0;
             }
         }
 
@@ -1145,8 +1097,8 @@ public final class VulkanComputeContext {
                     (initialized ? " (init attempted but failed)" : " (not initialized)");
         }
         return String.format(
-                "PFSF Vulkan Compute: %s | Shared=%s | WorkGroup=%d×%d×%d | SSBO Max=%d MB",
-                deviceName, sharedDevice,
+                "PFSF Vulkan Compute: %s | WorkGroup=%d×%d×%d | SSBO Max=%d MB",
+                deviceName,
                 maxWorkGroupSizeX, maxWorkGroupSizeY, maxWorkGroupSizeZ,
                 maxStorageBufferRange / (1024 * 1024));
     }

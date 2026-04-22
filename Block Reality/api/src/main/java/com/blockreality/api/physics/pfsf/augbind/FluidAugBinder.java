@@ -24,7 +24,9 @@ public final class FluidAugBinder extends AbstractAugBinder {
 
     @Override
     protected boolean isActive() {
-        return ModuleRegistry.getFluidManager() != null;
+        // NoOpFluidManager.INSTANCE 是倍位符（功能停用），不視為真實的 manager
+        IFluidManager fluid = ModuleRegistry.getFluidManager();
+        return fluid != null && !(fluid instanceof com.blockreality.api.spi.NoOpFluidManager);
     }
 
     @Override

@@ -599,9 +599,11 @@ public class BrCommand {
                 BRConfig.isPhysicsEnabled(), BRConfig.isPFSFEnabled(), BRConfig.isPFSFPCGEnabled());
         LOGGER.info("  pfsfTickBudget={}ms  maxIslandSize={}  vram={}%",
                 BRConfig.getPFSFTickBudgetMs(), BRConfig.getPFSFMaxIslandSize(), BRConfig.getVramUsagePercent());
+        /*
         LOGGER.info("  fluidEnabled={}  thermalEnabled={}  windEnabled={}  emEnabled={}",
                 BRConfig.isFluidEnabled(), BRConfig.isThermalEnabled(),
                 BRConfig.isWindEnabled(), BRConfig.isEmEnabled());
+        */
         LOGGER.info("  maxCollapsePerTick={}  maxIslandsPerTick={}  evictorMinAge={}",
                 BRConfig.getMaxCollapsePerTick(), BRConfig.getMaxIslandsPerTick(),
                 BRConfig.getEvictorMinAgeTicks());

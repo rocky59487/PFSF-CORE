@@ -1,5 +1,8 @@
 #version 450
 
+#extension GL_GOOGLE_include_directive : enable
+#include "stencil_constants.glsl"
+
 // ═══════════════════════════════════════════════════════════════
 //  AMG Coarse Jacobi: e_c = D_c⁻¹ · r_c
 //

@@ -1,6 +1,5 @@
 package com.blockreality.api.client;
 
-import com.blockreality.api.client.render.effect.StructuralFXRenderer;
 import com.blockreality.api.network.CollapseEffectPacket.CollapseInfo;
 import com.blockreality.api.physics.FailureType;
 import net.minecraft.client.Minecraft;
@@ -43,33 +42,6 @@ public class ClientCollapseCache {
         }
     }
 
-    /**
-     * 在渲染線程上消費崩塌效果，生成對應視覺。
-     * 由 StructuralFXRenderer.render() 每幀呼叫。
-     */
-    public static void drainAndSpawnEffects(StructuralFXRenderer renderer) {
-        CollapseEffect effect;
-        while ((effect = pendingEffects.poll()) != null) {
-            // 原有小碎片粒子
-            renderer.spawnCollapseFX(effect.pos, effect.type, effect.materialId);
-
-            // 電影級墜落碎塊（大型旋轉方塊）
-            float[] color = getMaterialColor(effect.materialId);
-            switch (effect.type) {
-                case CRUSHING ->
-                        renderer.spawnFallingChunks(effect.pos, color[0], color[1], color[2], 3, 0.8f);
-                case CANTILEVER_BREAK ->
-                        renderer.spawnFallingChunks(effect.pos, color[0], color[1], color[2], 2, 0.9f);
-                case TENSION_BREAK ->
-                        renderer.spawnFallingChunks(effect.pos, color[0], color[1], color[2], 2, 0.6f);
-                case NO_SUPPORT ->
-                        renderer.spawnFallingChunks(effect.pos, color[0], color[1], color[2], 1, 1.0f);
-            }
-
-            // 攝影機震動 + 環境粉塵
-            triggerClientCollapseEffect(effect.pos, effect.type);
-        }
-    }
 
     /** 材質 ID → RGB 顏色 */
     private static float[] getMaterialColor(int materialId) {
@@ -98,22 +70,6 @@ public class ClientCollapseCache {
         double distSq = mc.player.blockPosition().distSqr(pos);
         if (distSq > 64 * 64) return;
 
-        // ── 電影級攝影機震動（取代 animateHurt） ──
-        var shaker = com.blockreality.api.client.render.effect.CameraShakeManager.class;
-        switch (type) {
-            case CRUSHING -> // 低頻強震（地面衝擊波）
-                com.blockreality.api.client.render.effect.CameraShakeManager
-                        .triggerShake(pos, 0.15f, 12.0f, 25);
-            case CANTILEVER_BREAK -> // 中頻中震
-                com.blockreality.api.client.render.effect.CameraShakeManager
-                        .triggerShake(pos, 0.10f, 8.0f, 18);
-            case TENSION_BREAK -> // 高頻短促（金屬斷裂振動）
-                com.blockreality.api.client.render.effect.CameraShakeManager
-                        .triggerShake(pos, 0.06f, 16.0f, 10);
-            case NO_SUPPORT -> // 輕微震動
-                com.blockreality.api.client.render.effect.CameraShakeManager
-                        .triggerShake(pos, 0.04f, 6.0f, 12);
-        }
 
         // ── 環境粉塵粒子 ──
         if (distSq < 32 * 32) {

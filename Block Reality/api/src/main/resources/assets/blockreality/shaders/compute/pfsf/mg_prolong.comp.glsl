@@ -1,5 +1,8 @@
 #version 450
 
+#extension GL_GOOGLE_include_directive : enable
+#include "stencil_constants.glsl"
+
 // ═══════════════════════════════════════════════════════════════
 //  PFSF Multigrid Prolongation — 修正量插值（粗 → 細）
 //  三線性插值粗網格修正量 e 回細網格：phi_fine += e

@@ -43,7 +43,7 @@ import java.util.function.BiConsumer;
  * @since v3.0 Phase 1
  */
 @NotThreadSafe
-public class SparseVoxelOctree implements com.blockreality.api.client.render.SectionDataSource {
+public class SparseVoxelOctree {
 
     private static final Logger LOGGER = LogManager.getLogger("BR/SVO");
 
@@ -335,27 +335,10 @@ public class SparseVoxelOctree implements com.blockreality.api.client.render.Sec
              | (sz & 0xFFFFFFF);
     }
 
-    // ═══ SectionDataSource 介面實作（instance delegates to static）═══
-
-    /** @see SectionDataSource */
-    @Override
-    public int sectionKeyX(long key) { return sectionKeyXStatic(key); }
-
-    /** @see SectionDataSource */
-    @Override
-    public int sectionKeyY(long key) { return sectionKeyYStatic(key); }
-
-    /** @see SectionDataSource */
-    @Override
-    public int sectionKeyZ(long key) { return sectionKeyZStatic(key); }
-
     /**
      * 從 key 解碼 Section X 座標。
-     * @deprecated 請使用 {@link #sectionKeyX(long)} 實例方法或 SectionDataSource 介面
+     * 靜態實作 — 供向後相容。
      */
-
-
-    /** 靜態實作 — 供向後相容與實例方法委託。 */
     public static int sectionKeyXStatic(long key) {
         int raw = (int) ((key >> 40) & 0xFFFFF);
         // 符號擴展 20-bit

@@ -67,22 +67,22 @@ public final class PFSFConductivity {
         float decay = 1.0f; // Deprecated MOMENT_BETA, removing decay impact.
 
         // ─── v2.1: 上風向傳導率偏置（Upwind Wind Conductivity）───
-        // 取代舊 WIND_CONDUCTIVITY_DECAY 硬截斷，改用一階迎風格式。
-        // 上風向（體素面朝向風源）→ 傳導率增強：σ' = σ × (1 + k_wind)
-        // 下風向（背風面）→ 傳導率衰減：σ' = σ / (1 + k_wind)
-        // 參考：Anderson 2010 Potential Flow Theory §5；k_wind=0.30f ≈ Eurocode 1 Cp 比值
+        // 移除非對稱性錯誤 (Point 7)：迎風偏置導致 A[i][j] != A[j][i]，
+        // 這會破壞系統矩陣的對稱性，導致 PCG 求解器發散或物理場不穩定。
+        // 對於結構力學的勢場求解，矩陣必須保持對稱正定。
+        // 風壓對結構的影響應透過 Source Term (rho) 體現，而非修改傳導率 σ。
+        /*
         if (windVec != null) {
             float dx = (float) windVec.x;
             float dz = (float) windVec.z;
-            // 方向向量在水平面的投影內積（忽略 Y 分量，風壓只影響水平方向）
             float dot = dir.getStepX() * dx + dir.getStepZ() * dz;
             if (dot > 0.0f) {
-                sigmaH *= (1.0f + WIND_UPWIND_FACTOR);   // 順風方向：增強傳導
+                sigmaH *= (1.0f + WIND_UPWIND_FACTOR);
             } else if (dot < 0.0f) {
-                sigmaH /= (1.0f + WIND_UPWIND_FACTOR);   // 逆風方向：衰減傳導
+                sigmaH /= (1.0f + WIND_UPWIND_FACTOR);
             }
-            // dot == 0.0f（側風）：不改變
         }
+        */
 
         float result = sigmaH * decay;
         // H5-fix: NaN/Inf 防護

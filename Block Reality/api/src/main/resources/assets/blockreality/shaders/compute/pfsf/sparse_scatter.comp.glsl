@@ -1,5 +1,8 @@
 #version 450
 
+#extension GL_GOOGLE_include_directive : enable
+#include "stencil_constants.glsl"
+
 // ══════════════════════════════════════════════════════════════
 //  PFSF Sparse Scatter — GPU 端稀疏更新散布
 //  從小型 update buffer 將變更散布到大型 source/conductivity/type 陣列

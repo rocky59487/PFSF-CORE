@@ -167,11 +167,14 @@ void main() {
     if (sumSigma > 0.0) {
         phi_gs = (rho[i] + sumNeighbor) / sumSigma;
     } else {
-        phi_gs = 1e7;  // 孤立體素（B4-fix）
+        // 修正能量爆炸 (Point 3)：孤立體素不應給予 1e7，
+        // 這會導致能量場 hField 溢出並錯誤擴散至鄰居。
+        // 改為設為 0，由 failure_scan 進行拓撲判定。
+        phi_gs = 0.0;
     }
 
     // ─── v2.1: Amor 啟發式拉壓分裂（與 jacobi_smooth 邏輯一致）───
-    {
+    if (phi_gs > 0.0) {
         float flux_in  = 0.0;
         float flux_out = 0.0;
         for (int d = 0; d < 6; d++) {

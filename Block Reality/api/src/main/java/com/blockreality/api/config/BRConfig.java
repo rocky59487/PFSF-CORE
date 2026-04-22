@@ -126,14 +126,6 @@ public class BRConfig {
     /** ★ v3.0: Coarse FEM 分析間隔（ticks，20 = 1 秒） */
     public final ForgeConfigSpec.IntValue coarseFEMInterval;
 
-    /** ★ v3.0: 持久化渲染管線 GPU 記憶體上限（MB） */
-    public final ForgeConfigSpec.IntValue renderGpuMemoryLimitMB;
-
-    /** ★ v3.0: Greedy Meshing 啟用 */
-    public final ForgeConfigSpec.BooleanValue enableGreedyMeshing;
-
-    /** ★ v3.0: Section VBO 渲染距離（格） */
-    public final ForgeConfigSpec.IntValue sectionRenderDistance;
 
     // ─── PFSF GPU 引擎 TOML 參數 ───
     public final ForgeConfigSpec.BooleanValue pfsfEnabledConfig;
@@ -294,17 +286,6 @@ public class BRConfig {
             .comment("v3.0: Coarse FEM stress analysis interval (ticks). 20 = every 1 second.")
             .defineInRange("coarse_fem_interval", 20, 5, 200);
 
-        renderGpuMemoryLimitMB = builder
-            .comment("v3.0: Persistent render pipeline GPU memory limit (MB).")
-            .defineInRange("render_gpu_memory_limit_mb", 512, 64, 2048);
-
-        enableGreedyMeshing = builder
-            .comment("v3.0: Enable greedy meshing for section VBO compilation. Reduces vertex count 60-95%.")
-            .define("enable_greedy_meshing", true);
-
-        sectionRenderDistance = builder
-            .comment("v3.0: Maximum render distance for section VBOs (blocks).")
-            .defineInRange("section_render_distance", 256, 32, 1024);
 
         builder.pop().push("pfsf");
 
@@ -517,7 +498,6 @@ public class BRConfig {
         if (INSTANCE != null) INSTANCE.pfsfOmegaConfig.set(pfsfOmega);
     }
 
-    /** PFSF 收斂閾值（0.0001–0.1） */
     public static double getPFSFConvergenceThreshold() {
         return INSTANCE != null ? INSTANCE.pfsfConvergenceThresholdConfig.get() : pfsfConvergenceThreshold;
     }
@@ -545,101 +525,8 @@ public class BRConfig {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  PFSF-Fluid 流體模擬配置
+    //  自重傾覆物理（蹺蹺板） ═══
     // ═══════════════════════════════════════════════════════════════
-
-    private static volatile boolean fluidEnabled = false;         // 預設關閉（opt-in）
-    private static volatile int fluidTickBudgetMs = 4;            // 流體每 tick 預算（ms）
-    private static volatile int fluidMaxRegionSize = 64;          // 每軸最大方塊數
-
-    /** 流體模擬是否啟用（預設關閉） */
-    public static boolean isFluidEnabled() {
-        return INSTANCE != null ? INSTANCE.fluidEnabledConfig.get() : fluidEnabled;
-    }
-    public static void setFluidEnabled(boolean enabled) {
-        fluidEnabled = enabled;
-        if (INSTANCE != null) INSTANCE.fluidEnabledConfig.set(enabled);
-    }
-
-    /** 流體每 tick 最大 GPU 計算時間（毫秒） */
-    public static int getFluidTickBudgetMs() {
-        return INSTANCE != null ? INSTANCE.fluidTickBudgetMsConfig.get() : fluidTickBudgetMs;
-    }
-    public static void setFluidTickBudgetMs(int ms) {
-        fluidTickBudgetMs = Math.max(1, Math.min(ms, 15));
-        if (INSTANCE != null) INSTANCE.fluidTickBudgetMsConfig.set(fluidTickBudgetMs);
-    }
-
-    /** 流體區域每軸最大方塊數 */
-    public static int getFluidMaxRegionSize() {
-        return INSTANCE != null ? INSTANCE.fluidMaxRegionSizeConfig.get() : fluidMaxRegionSize;
-    }
-    public static void setFluidMaxRegionSize(int size) {
-        fluidMaxRegionSize = Math.max(16, Math.min(size, 128));
-        if (INSTANCE != null) INSTANCE.fluidMaxRegionSizeConfig.set(fluidMaxRegionSize);
-    }
-
-    // ═══ PFSF-Thermal 熱傳導 ═══
-
-    private static volatile boolean thermalEnabled = false;
-    private static volatile int thermalTickBudgetMs = 3;
-
-    public static boolean isThermalEnabled() {
-        return INSTANCE != null ? INSTANCE.thermalEnabledConfig.get() : thermalEnabled;
-    }
-    public static void setThermalEnabled(boolean enabled) {
-        thermalEnabled = enabled;
-        if (INSTANCE != null) INSTANCE.thermalEnabledConfig.set(enabled);
-    }
-    public static int getThermalTickBudgetMs() {
-        return INSTANCE != null ? INSTANCE.thermalTickBudgetMsConfig.get() : thermalTickBudgetMs;
-    }
-    public static void setThermalTickBudgetMs(int ms) {
-        thermalTickBudgetMs = Math.max(1, Math.min(ms, 10));
-        if (INSTANCE != null) INSTANCE.thermalTickBudgetMsConfig.set(thermalTickBudgetMs);
-    }
-
-    // ═══ PFSF-Wind 風場 ═══
-
-    private static volatile boolean windEnabled = false;
-    private static volatile int windTickBudgetMs = 3;
-
-    public static boolean isWindEnabled() {
-        return INSTANCE != null ? INSTANCE.windEnabledConfig.get() : windEnabled;
-    }
-    public static void setWindEnabled(boolean enabled) {
-        windEnabled = enabled;
-        if (INSTANCE != null) INSTANCE.windEnabledConfig.set(enabled);
-    }
-    public static int getWindTickBudgetMs() {
-        return INSTANCE != null ? INSTANCE.windTickBudgetMsConfig.get() : windTickBudgetMs;
-    }
-    public static void setWindTickBudgetMs(int ms) {
-        windTickBudgetMs = Math.max(1, Math.min(ms, 10));
-        if (INSTANCE != null) INSTANCE.windTickBudgetMsConfig.set(windTickBudgetMs);
-    }
-
-    // ═══ PFSF-EM 電磁場 ═══
-
-    private static volatile boolean emEnabled = false;
-    private static volatile int emTickBudgetMs = 2;
-
-    public static boolean isEmEnabled() {
-        return INSTANCE != null ? INSTANCE.emEnabledConfig.get() : emEnabled;
-    }
-    public static void setEmEnabled(boolean enabled) {
-        emEnabled = enabled;
-        if (INSTANCE != null) INSTANCE.emEnabledConfig.set(enabled);
-    }
-    public static int getEmTickBudgetMs() {
-        return INSTANCE != null ? INSTANCE.emTickBudgetMsConfig.get() : emTickBudgetMs;
-    }
-    public static void setEmTickBudgetMs(int ms) {
-        emTickBudgetMs = Math.max(1, Math.min(ms, 10));
-        if (INSTANCE != null) INSTANCE.emTickBudgetMsConfig.set(emTickBudgetMs);
-    }
-
-    // ═══ 自重傾覆物理（蹺蹺板） ═══
 
     /**
      * 啟用自重重心傾覆物理。

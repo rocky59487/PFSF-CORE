@@ -163,10 +163,15 @@ public final class PFSFDataBuilder {
         buf.writeLookupCuring(hydration);
 
         // Diagonal phantom edges
-        int phantomCount = PFSFSourceBuilder.injectDiagonalPhantomEdges(
+        // 移除虛擬邊注入 (Point 8)：GPU Shader 已實作 26-連通 Stencil，
+        // 在 CPU 端再次注入會導致剛性重複計算 (Double-Counting Over-Stiffening)。
+        int phantomCount = 0;
+        /*
+        phantomCount = PFSFSourceBuilder.injectDiagonalPhantomEdges(
                 members, conductivity, N,
                 buf.getLx(), buf.getLy(), buf.getLz(), buf.getOrigin(),
                 materialLookup);
+        */
         if (phantomCount > 0) {
             LOGGER.debug("[PFSF] Island {} — injected {} diagonal phantom edges",
                     island.getId(), phantomCount);
@@ -253,14 +258,15 @@ public final class PFSFDataBuilder {
             sigmaMax = normalizeSoA6JavaRef(source, rcomp, rtens, conductivity, N);
         }
 
-        // maxPhi scaling stays in the policy layer — it is a derived array
-        // owned by the Java caller and the native primitive does not see it.
-        // Apply only when sigmaMax actually crossed the normalisation
-        // threshold (matches the Java ref's `if (sigmaMax > 1.0f)` guard).
+        // 修正：移除對 maxPhi 的正規化縮放 (Normalization Bug)
+        // 由於勢場方程 A*phi = b 在兩邊同除 sigmaMax 後，解 phi 是標度不變的 (Scale-Invariant)。
+        // 因此 maxPhi 作為 phi 的閾值，不應該被縮放，否則會引發高剛性結構無故崩塌。
+        /*
         if (maxPhi != null && sigmaMax > 1.0f) {
             float inv = 1.0f / sigmaMax;
             for (int j = 0; j < N; j++) maxPhi[j] *= inv;
         }
+        */
         return sigmaMax;
     }
 

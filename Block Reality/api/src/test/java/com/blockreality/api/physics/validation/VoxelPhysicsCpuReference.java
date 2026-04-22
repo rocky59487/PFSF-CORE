@@ -50,36 +50,67 @@ public final class VoxelPhysicsCpuReference {
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * 單次 Jacobi 步（6-conn），σ 全均勻。
+     * 學術嚴謹的 26 連通 Jacobi 迭代步。
      *
-     * <p>對應 jacobi_smooth.comp.glsl 的 6-face 部分邏輯（不含 12 邊 + 8 角）。
-     * 簡化假設：所有 solid-solid 面連線 σ = 給定常數；solid-anchor 面同樣。
+     * <p>精確計算離散 Poisson 方程：A φ = b 
+     * 其中 A_ij = -σ_ij, A_ii = Σ σ_ij。
+     * σ_ij 計算與 EnergyEvaluatorCPU 完全對齊，保證數學嚴格性。
+     * 採用 double 累加避免在大量聚合時發生浮點數災難性抵消 (catastrophic cancellation)。
      *
-     * @return 新的 phi 陣列
+     * @param phiPrev         上一步的勢場陣列
+     * @param dom             領域幾何與物理屬性
+     * @param legacySigmaFace (已廢棄) 過去用於強制固定導率，現已改為直接讀取 dom.sigma()
+     * @param omega           鬆弛因子 (1.0 = 標準 Jacobi)
+     * @return 新的勢場陣列
      */
-    public static float[] jacobiStep(float[] phiPrev, Domain dom, float sigmaFace, float omega) {
-        int Lx = dom.Lx, Ly = dom.Ly, Lz = dom.Lz;
+    public static float[] jacobiStep(float[] phiPrev, Domain dom, float legacySigmaFace, float omega) {
+        int Lx = dom.Lx(), Ly = dom.Ly(), Lz = dom.Lz();
         float[] phi = new float[dom.N()];
+        
+        int[][] offs = com.blockreality.api.physics.pfsf.PFSFStencil.NEIGHBOR_OFFSETS;
+        float EDGE_P = com.blockreality.api.physics.pfsf.PFSFStencil.EDGE_P;
+        float CORNER_P = com.blockreality.api.physics.pfsf.PFSFStencil.CORNER_P;
+
         for (int z = 0; z < Lz; z++) {
             for (int y = 0; y < Ly; y++) {
                 for (int x = 0; x < Lx; x++) {
                     int i = dom.idx(x, y, z);
-                    byte t = dom.type[i];
-                    if (t == TYPE_ANCHOR || t == TYPE_AIR) { phi[i] = 0f; continue; }
-
-                    float sumSig = 0f, sumNbr = 0f;
-                    // 6 個面鄰居
-                    int[][] offs = {{-1,0,0},{1,0,0},{0,-1,0},{0,1,0},{0,0,-1},{0,0,1}};
-                    for (int[] off : offs) {
-                        int nx = x+off[0], ny = y+off[1], nz = z+off[2];
-                        if (nx<0||nx>=Lx||ny<0||ny>=Ly||nz<0||nz>=Lz) continue;
-                        int j = dom.idx(nx, ny, nz);
-                        if (dom.type[j] == TYPE_AIR) continue;
-                        sumSig += sigmaFace;
-                        sumNbr += sigmaFace * phiPrev[j];
+                    byte t = dom.type()[i];
+                    if (t == TYPE_ANCHOR || t == TYPE_AIR) { 
+                        phi[i] = 0f; 
+                        continue; 
                     }
-                    float phiJ = (sumSig > 0f) ? (dom.source[i] + sumNbr) / sumSig : phiPrev[i];
-                    phi[i] = omega * (phiJ - phiPrev[i]) + phiPrev[i];
+
+                    double diagA = 0.0;
+                    double offDiagSum = 0.0;
+                    float sigI = Math.max(0f, dom.sigma()[i]);
+
+                    for (int[] off : offs) {
+                        int nx = x + off[0], ny = y + off[1], nz = z + off[2];
+                        if (nx < 0 || nx >= Lx || ny < 0 || ny >= Ly || nz < 0 || nz >= Lz) continue;
+                        int j = dom.idx(nx, ny, nz);
+                        if (dom.type()[j] == TYPE_AIR) continue;
+                        
+                        float sigJ = Math.max(0f, dom.sigma()[j]);
+                        
+                        // 計算與 EnergyEvaluatorCPU 一致的導率，嚴謹遵守 26 連拓撲
+                        int nonzero = (off[0] != 0 ? 1 : 0) + (off[1] != 0 ? 1 : 0) + (off[2] != 0 ? 1 : 0);
+                        double sigIJ = 0.0;
+                        if (nonzero == 1) { // 面
+                            sigIJ = 0.5 * (sigI + sigJ);
+                        } else if (nonzero == 2) { // 邊
+                            sigIJ = Math.sqrt(sigI * sigJ) * EDGE_P;
+                        } else if (nonzero == 3) { // 角
+                            sigIJ = Math.sqrt(sigI * sigJ) * CORNER_P; // 退化為 sqrt(因點只有兩端)
+                        }
+                        
+                        diagA += sigIJ;
+                        offDiagSum += sigIJ * phiPrev[j];
+                    }
+                    
+                    double b = dom.source()[i];
+                    double phiJ = (diagA > 1e-15) ? (b + offDiagSum) / diagA : phiPrev[i];
+                    phi[i] = (float) (omega * (phiJ - phiPrev[i]) + phiPrev[i]);
                 }
             }
         }
@@ -87,10 +118,10 @@ public final class VoxelPhysicsCpuReference {
     }
 
     /** 跑 N 步 Jacobi，初始 phi 為 0。回傳最終 phi。 */
-    public static float[] solve(Domain dom, float sigmaFace, int steps) {
+    public static float[] solve(Domain dom, float legacySigmaFace, int steps) {
         float[] phi = new float[dom.N()];
         for (int s = 0; s < steps; s++) {
-            phi = jacobiStep(phi, dom, sigmaFace, 1.0f);
+            phi = jacobiStep(phi, dom, legacySigmaFace, 1.0f);
         }
         return phi;
     }
@@ -102,33 +133,34 @@ public final class VoxelPhysicsCpuReference {
     /**
      * BFS from all anchor voxels，回傳不可達（orphan）的 solid voxel 索引集合。
      * 用於 FloatingIslandTest 驗證 NO_SUPPORT 偵測。
+     * 已升級至 26-connectivity，能正確穿越對角線識別結構連續性。
      */
     public static Set<Integer> findOrphans(Domain dom) {
         Set<Integer> reached = new HashSet<>();
         Deque<int[]> q = new ArrayDeque<>();
         for (int i = 0; i < dom.N(); i++) {
-            if (dom.type[i] == TYPE_ANCHOR) {
+            if (dom.type()[i] == TYPE_ANCHOR) {
                 reached.add(i);
-                int x = i % dom.Lx;
-                int y = (i / dom.Lx) % dom.Ly;
-                int z = i / (dom.Lx * dom.Ly);
+                int x = i % dom.Lx();
+                int y = (i / dom.Lx()) % dom.Ly();
+                int z = i / (dom.Lx() * dom.Ly());
                 q.add(new int[]{x, y, z});
             }
         }
-        int[][] offs = {{-1,0,0},{1,0,0},{0,-1,0},{0,1,0},{0,0,-1},{0,0,1}};
+        int[][] offs = com.blockreality.api.physics.pfsf.PFSFStencil.NEIGHBOR_OFFSETS;
         while (!q.isEmpty()) {
             int[] p = q.pop();
             for (int[] off : offs) {
                 int nx = p[0]+off[0], ny = p[1]+off[1], nz = p[2]+off[2];
-                if (nx<0||nx>=dom.Lx||ny<0||ny>=dom.Ly||nz<0||nz>=dom.Lz) continue;
+                if (nx<0||nx>=dom.Lx()||ny<0||ny>=dom.Ly()||nz<0||nz>=dom.Lz()) continue;
                 int j = dom.idx(nx, ny, nz);
-                if (dom.type[j] != TYPE_SOLID) continue;
+                if (dom.type()[j] != TYPE_SOLID && dom.type()[j] != TYPE_ANCHOR) continue;
                 if (reached.add(j)) q.add(new int[]{nx, ny, nz});
             }
         }
         Set<Integer> orphans = new HashSet<>();
         for (int i = 0; i < dom.N(); i++) {
-            if (dom.type[i] == TYPE_SOLID && !reached.contains(i)) orphans.add(i);
+            if (dom.type()[i] == TYPE_SOLID && !reached.contains(i)) orphans.add(i);
         }
         return orphans;
     }

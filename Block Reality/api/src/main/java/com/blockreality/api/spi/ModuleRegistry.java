@@ -48,7 +48,6 @@ public class ModuleRegistry {
 
     // ─── Service Provider Lists (thread-safe) ───
     private final List<ICommandProvider> commandProviders = new CopyOnWriteArrayList<>();
-    private final List<IRenderLayerProvider> renderProviders = new CopyOnWriteArrayList<>();
     private final List<IBlockTypeExtension> blockTypeExtensions = new CopyOnWriteArrayList<>();
 
     // ─── Material Registry (singleton, backed by ConcurrentHashMap) ───
@@ -68,10 +67,12 @@ public class ModuleRegistry {
 
     // ─── Fluid Manager (singleton, opt-in) ───
     // P1-C: 改用 AtomicReference，getter/setter 對稱，無需混用 volatile + synchronized
-    private final AtomicReference<IFluidManager> fluidManager = new AtomicReference<>(null);
+    // SLIM-CORE: Default to NoOpFluidManager
+    private final AtomicReference<IFluidManager> fluidManager = new AtomicReference<>(NoOpFluidManager.INSTANCE);
 
     // ─── Multi-domain physics managers (opt-in) ───
-    private final AtomicReference<IThermalManager> thermalManager = new AtomicReference<>(null);
+    // SLIM-CORE: Default to NoOpThermalManager
+    private final AtomicReference<IThermalManager> thermalManager = new AtomicReference<>(NoOpThermalManager.INSTANCE);
     private final AtomicReference<IWindManager> windManager = new AtomicReference<>(null);
     private final AtomicReference<IElectromagneticManager> emManager = new AtomicReference<>(null);
 
@@ -138,48 +139,6 @@ public class ModuleRegistry {
      */
     public static List<ICommandProvider> getCommandProviders() {
         return new ArrayList<>(INSTANCE.commandProviders);
-    }
-
-    // ═══════════════════════════════════════════════════════
-    //  Render Layer Provider Registration
-    // ═══════════════════════════════════════════════════════
-
-    /**
-     * Register a render layer provider with the module registry.
-     *
-     * The provider's onRenderLevelStage() method will be called each frame
-     * if isEnabled() returns true, allowing the module to inject custom rendering.
-     *
-     * This registration is client-side only.
-     *
-     * @param provider The IRenderLayerProvider implementation to register
-     */
-    public static void registerRenderLayerProvider(IRenderLayerProvider provider) {
-        INSTANCE.renderProviders.add(provider);
-        LOGGER.debug("[BR-ModuleRegistry] Registered render layer provider: {}",
-            provider.getRenderLayerId());
-    }
-
-    /**
-     * Unregister a previously registered render layer provider.
-     *
-     * @param provider The IRenderLayerProvider implementation to unregister
-     */
-    public static void unregisterRenderLayerProvider(IRenderLayerProvider provider) {
-        INSTANCE.renderProviders.remove(provider);
-        LOGGER.debug("[BR-ModuleRegistry] Unregistered render layer provider: {}",
-            provider.getRenderLayerId());
-    }
-
-    /**
-     * Get all registered render layer providers.
-     *
-     * Returns a copy of the internal list to prevent concurrent modification exceptions.
-     *
-     * @return A list of all registered IRenderLayerProvider instances
-     */
-    public static List<IRenderLayerProvider> getRenderLayerProviders() {
-        return new ArrayList<>(INSTANCE.renderProviders);
     }
 
     // ═══════════════════════════════════════════════════════
@@ -404,33 +363,6 @@ public class ModuleRegistry {
     }
 
     // ═══════════════════════════════════════════════════════
-    //  Render Event Dispatch (CLIENT-SIDE ONLY)
-    // ═══════════════════════════════════════════════════════
-
-    /**
-     * Fire the RenderLevelStageEvent to all registered render layer providers.
-     *
-     * This method should be called from ClientSetup.ClientForgeEvents.onRenderLevel()
-     * to allow modules to inject their custom render layers.
-     *
-     * Only renders providers where isEnabled() returns true.
-     *
-     * @param event The RenderLevelStageEvent from the client render pipeline
-     */
-    public static void fireRenderEvent(RenderLevelStageEvent event) {
-        for (IRenderLayerProvider provider : INSTANCE.renderProviders) {
-            try {
-                if (provider.isEnabled()) {
-                    provider.onRenderLevelStage(event);
-                }
-            } catch (RuntimeException e) {
-                LOGGER.error("[BR-ModuleRegistry] Error in render provider {}: {}",
-                    provider.getRenderLayerId(), e.getMessage(), e);
-            }
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════
     //  Diagnostic
     // ═══════════════════════════════════════════════════════
 
@@ -446,14 +378,12 @@ public class ModuleRegistry {
         return String.format(
             "ModuleRegistry Summary:\n" +
             "  Command Providers: %d\n" +
-            "  Render Layers: %d\n" +
             "  Block Types: %d\n" +
             "  Materials: %d\n" +
             "  Active Curing Blocks: %d\n" +
             "  Active Cables: %d\n" +
             "  Fusion Detector: %s",
             INSTANCE.commandProviders.size(),
-            INSTANCE.renderProviders.size(),
             INSTANCE.blockTypeExtensions.size(),
             INSTANCE.materialRegistry.getCount(),
             INSTANCE.curingManager.getActiveCuringCount(),

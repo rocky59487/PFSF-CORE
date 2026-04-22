@@ -1,4 +1,7 @@
 #version 450
+
+#extension GL_GOOGLE_include_directive : enable
+#include "stencil_constants.glsl"
 #extension GL_EXT_shader_explicit_arithmetic_types : enable
 
 // ═══════════════════════════════════════════════════════════════

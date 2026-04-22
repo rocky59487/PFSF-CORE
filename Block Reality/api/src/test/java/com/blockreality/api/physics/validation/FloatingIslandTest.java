@@ -38,7 +38,7 @@ class FloatingIslandTest {
         Set<Integer> orphans = VoxelPhysicsCpuReference.findOrphans(dom);
         // 所有 type == ANCHOR 的 voxel 都不能在 orphan 集合
         for (int i = 0; i < dom.N(); i++) {
-            if (dom.type[i] == VoxelPhysicsCpuReference.TYPE_ANCHOR) {
+            if (dom.type()[i] == VoxelPhysicsCpuReference.TYPE_ANCHOR) {
                 assertFalse(orphans.contains(i),
                     "anchor i=" + i + " 不應被視為 orphan");
             }
@@ -50,7 +50,7 @@ class FloatingIslandTest {
         Domain dom = VoxelPhysicsCpuReference.buildFloatingIsland(11, 11, 11, 5, 5, 5);
         Set<Integer> orphans = VoxelPhysicsCpuReference.findOrphans(dom);
         for (int i = 0; i < dom.N(); i++) {
-            if (dom.type[i] == VoxelPhysicsCpuReference.TYPE_AIR) {
+            if (dom.type()[i] == VoxelPhysicsCpuReference.TYPE_AIR) {
                 assertFalse(orphans.contains(i),
                     "air voxel i=" + i + " 不應被視為 orphan");
             }

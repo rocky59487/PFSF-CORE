@@ -73,9 +73,8 @@ pfsf_result PFSFEngine::init() {
         *vk_, *jacobi_, *vcycle_, *phaseField_, *failure_, *pcg_, *sparse_);
 
     available_ = true;
-    fprintf(stderr, "[libpfsf] Engine initialized (%s, VRAM: %lld MB)\n",
-            vk_->deviceName().c_str(),
-            (long long)(vk_->deviceLocalBytes() / (1024 * 1024)));
+    fprintf(stderr, "[libpfsf] Engine initialized on: %s\n",
+            vk_->deviceName().c_str());
     return PFSF_OK;
 }
 

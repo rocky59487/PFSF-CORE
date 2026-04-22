@@ -61,7 +61,15 @@ public final class NativePFSFRuntime {
 
         long h = 0L;
         try {
-            h = NativePFSFBridge.nativeCreate(50_000, Math.max(1, BRConfig.getPFSFTickBudgetMs()), 512L * 1024 * 1024, true, true);
+            // 修正：在測試環境中 BRConfig 可能未載入，提供安全回退值
+            int budget = 10;
+            boolean pcgEnabled = true;
+            try {
+                budget = BRConfig.getPFSFTickBudgetMs();
+                pcgEnabled = BRConfig.isPFSFPCGEnabled();
+            } catch (Throwable ignored) {}
+
+            h = NativePFSFBridge.nativeCreate(50_000, Math.max(1, budget), 512L * 1024 * 1024, true, true);
             if (h == 0L) return;
 
             int rc = NativePFSFBridge.nativeInit(h);
@@ -73,7 +81,7 @@ public final class NativePFSFRuntime {
             handle = h;
             active = true;
             try {
-                NativePFSFBridge.nativeSetPCGEnabled(h, BRConfig.isPFSFPCGEnabled());
+                NativePFSFBridge.nativeSetPCGEnabled(h, pcgEnabled);
             } catch (UnsatisfiedLinkError ignored) {}
             LOGGER.info("Native PFSF runtime attached (handle=0x{}, kernels_ported={})", Long.toHexString(h), KERNELS_PORTED);
         } catch (Throwable t) {

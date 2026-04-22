@@ -30,29 +30,12 @@ extern "C" void pfsf_apply_wind_bias(float* conductivity,
                                        int32_t n,
                                        pfsf_vec3 wind,
                                        float upwind_factor) {
-    if (conductivity == nullptr || n <= 0) return;
-    if (wind.x == 0.0f && wind.z == 0.0f) return;  /* no horizontal wind */
-
-    const float k_plus = 1.0f + upwind_factor;
-
-    /* Direction step (sx, sy, sz) for each of the 6 SoA slots. */
-    constexpr int32_t step_x[6] = { -1, +1,  0,  0,  0,  0 };
-    constexpr int32_t step_z[6] = {  0,  0,  0,  0, -1, +1 };
-
-    for (int32_t d = 0; d < 6; ++d) {
-        /* Only horizontal edges: skip d == 2 (-Y) and d == 3 (+Y). */
-        if (d == 2 || d == 3) continue;
-
-        const float dot = static_cast<float>(step_x[d]) * wind.x
-                          + static_cast<float>(step_z[d]) * wind.z;
-        if (dot == 0.0f) continue;
-
-        float* slot = conductivity + static_cast<size_t>(d) * static_cast<size_t>(n);
-        if (dot > 0.0f) {
-            for (int32_t i = 0; i < n; ++i) slot[i] *= k_plus;
-        } else {
-            const float inv = 1.0f / k_plus;
-            for (int32_t i = 0; i < n; ++i) slot[i] *= inv;
-        }
-    }
+    /* 移除非對稱性錯誤 (Point 7)：迎風偏置破壞了系統矩陣 A 的對稱性，
+       這會導致 PCG 求解器不穩定或發散。矩陣 A 必須保持對稱正定。
+       風壓應透過 Source Term 體現，不再修改 conductivity 陣列。
+       此函數現在為 no-op 以維持 ABI 相容性。 */
+    (void) conductivity;
+    (void) n;
+    (void) wind;
+    (void) upwind_factor;
 }

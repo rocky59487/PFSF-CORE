@@ -26,11 +26,7 @@ class ModuleRegistryTest {
         assertNotNull(providers, "getCommandProviders should return non-null collection");
     }
 
-    @Test
-    void testGetRenderLayerProvidersReturnsNonNull() {
-        List<IRenderLayerProvider> renderProviders = ModuleRegistry.getRenderLayerProviders();
-        assertNotNull(renderProviders, "getRenderLayerProviders should return non-null collection");
-    }
+    // 注意：IRenderLayerProvider 與 getRenderLayerProviders() 已隨渲染管線移除，測試已刪除。
 
     @Test
     void testGetMaterialRegistryReturnsNonNull() {

@@ -96,7 +96,6 @@ public final class BrDiagnosticUtil {
 
                 try {
                     info.put("VRAM PFSF Partition",  formatBytes(VulkanComputeContext.getPartitionUsage(VulkanComputeContext.PARTITION_PFSF)));
-                    info.put("VRAM Fluid Partition", formatBytes(VulkanComputeContext.getPartitionUsage(VulkanComputeContext.PARTITION_FLUID)));
                     info.put("VRAM Other Partition", formatBytes(VulkanComputeContext.getPartitionUsage(VulkanComputeContext.PARTITION_OTHER)));
                 } catch (Throwable e) { info.put("VRAM Partitions", "Error: " + e.getClass().getSimpleName()); }
             }
@@ -104,10 +103,7 @@ public final class BrDiagnosticUtil {
             // 模組功能開關狀態（逐一 catch，避免任一設定讀取失敗拖垮整個區塊）
             safeGet(info, "Physics Enabled",    () -> BRConfig.isPhysicsEnabled()  ? "Yes" : "No");
             safeGet(info, "PCG Solver",         () -> BRConfig.isPFSFPCGEnabled()  ? "Yes" : "No");
-            safeGet(info, "Fluid Sim",          () -> BRConfig.isFluidEnabled()    ? "Yes" : "No");
-            safeGet(info, "Thermal Sim",        () -> BRConfig.isThermalEnabled()  ? "Yes" : "No");
-            safeGet(info, "Wind Sim",           () -> BRConfig.isWindEnabled()     ? "Yes" : "No");
-            safeGet(info, "EM Sim",             () -> BRConfig.isEmEnabled()       ? "Yes" : "No");
+            // Fluid/Thermal/Wind/EM 模組已移除，不再顯示於診斷資訊
             safeGet(info, "Overturning Physics",() -> BRConfig.isOverturningEnabled() ? "Yes" : "No");
             safeGet(info, "PFSF Tick Budget",   () -> BRConfig.getPFSFTickBudgetMs() + " ms");
             safeGet(info, "Max Island Size",    () -> String.format("%,d blocks", BRConfig.getPFSFMaxIslandSize()));

@@ -83,6 +83,7 @@ public final class PFSFEngine {
     // ═══ Tick ═══
 
     public static void onServerTick(ServerLevel level, List<ServerPlayer> players, long currentEpoch) {
+        if (instance == null) return; // 引擎未初始化（無 GPU 或測試環境），安全跳過
         getRuntime().onServerTick(level, players, currentEpoch);
     }
 
