@@ -105,6 +105,24 @@ public class PFSFIslandBuffer {
     private long[] vectorFieldBuf;
     private boolean vectorFieldAllocated = false;
 
+    // ─── Label-propagation buffers (Phase B.2; feature-flag gated) ───
+    // Four separate VMA allocations rather than a coalesced region:
+    //   islandIdBuf     uint32 × N           — per-voxel component label
+    //   rootToSlotBuf   uint32 × N           — maps voxel flat index to dense slot (UNSET_SLOT if not a root)
+    //   componentsBuf   uint32 × 12 × MAX_COMPONENTS  — per-component metadata (root, count, anchored, AABB)
+    //   numCompBuf      uint32 × 2           — [0] = count, [1] = overflow flag
+    // See PFSFLabelPropCpuSimulator for the layout and semantics we
+    // port bit-for-bit. Keeping them separate from the coalesced
+    // allocation limits blast-radius of this change behind the
+    // `blockreality.pfsf.gpuLabelProp` system property: when the flag
+    // is off, none of these allocations happen and the VMA layout is
+    // byte-identical to the pre-Phase-B.2 build.
+    private long[] labelIdBuf;
+    private long[] rootToSlotBuf;
+    private long[] labelComponentsBuf;
+    private long[] labelNumCompBuf;
+    private boolean labelPropAllocated = false;
+
     AMGPreconditioner amgPreconditioner;
     private long[] amgAggregationBuf;
     private long[] amgPWeightBuf;
@@ -201,6 +219,13 @@ public class PFSFIslandBuffer {
         rhoSpecOverride = convergence.getRhoSpecOverride();
 
         allocated = true;
+
+        // Optional label-propagation buffers. Gated on a JVM system
+        // property so the default build path remains byte-identical to
+        // pre-Phase-B.2; opting in activates the GPU connectivity kernels.
+        if (isLabelPropEnabled()) {
+            allocateLabelProp();
+        }
     }
 
     public void allocateMultigrid() { multigrid.allocate(Lx, Ly, Lz); }
@@ -230,7 +255,62 @@ public class PFSFIslandBuffer {
         pcgAllocated = false;
     }
 
+    /**
+     * Allocate the four label-propagation buffers used by
+     * {@code PFSFLabelPropRecorder}. Must be invoked only when
+     * {@code System.getProperty("blockreality.pfsf.gpuLabelProp", "false")}
+     * is truthy; callers guarded by {@link #isLabelPropEnabled()} do
+     * exactly this. Idempotent: a second call on an already-allocated
+     * island is a no-op.
+     */
+    public void allocateLabelProp() {
+        if (labelPropAllocated || !allocated) return;
+        int N = getN();
+        int maxComponents = PFSFLabelPropCpuSimulator.MAX_COMPONENTS;
+        int storageUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+                | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        long uintN = (long) N * Integer.BYTES;
+        long componentsSize = (long) maxComponents * 12L * Integer.BYTES;     // 12 fields × 4 bytes
+        long numCompSize = 2L * Integer.BYTES;                                // [count, overflowFlag]
+        labelIdBuf          = VulkanComputeContext.allocateDeviceBuffer(uintN, storageUsage);
+        rootToSlotBuf       = VulkanComputeContext.allocateDeviceBuffer(uintN, storageUsage);
+        labelComponentsBuf  = VulkanComputeContext.allocateDeviceBuffer(componentsSize, storageUsage);
+        labelNumCompBuf     = VulkanComputeContext.allocateDeviceBuffer(numCompSize, storageUsage);
+        if (labelIdBuf == null || rootToSlotBuf == null || labelComponentsBuf == null || labelNumCompBuf == null) {
+            LOGGER.error("[PFSF] Island {} label-prop buffer allocation failed; feature disabled for this island", islandId);
+            freeLabelProp();
+            return;
+        }
+        labelPropAllocated = true;
+    }
+
+    /** Release the label-propagation buffers. Idempotent. */
+    public void freeLabelProp() {
+        freeBufferPair(labelIdBuf);         labelIdBuf = null;
+        freeBufferPair(rootToSlotBuf);      rootToSlotBuf = null;
+        freeBufferPair(labelComponentsBuf); labelComponentsBuf = null;
+        freeBufferPair(labelNumCompBuf);    labelNumCompBuf = null;
+        labelPropAllocated = false;
+    }
+
+    /** Global toggle read once per JVM. */
+    public static boolean isLabelPropEnabled() {
+        return Boolean.parseBoolean(System.getProperty("blockreality.pfsf.gpuLabelProp", "false"));
+    }
+
+    public boolean isLabelPropAllocated() { return labelPropAllocated; }
+    public long getLabelIdBuf()           { return labelIdBuf != null ? labelIdBuf[0] : 0; }
+    public long getRootToSlotBuf()        { return rootToSlotBuf != null ? rootToSlotBuf[0] : 0; }
+    public long getLabelComponentsBuf()   { return labelComponentsBuf != null ? labelComponentsBuf[0] : 0; }
+    public long getLabelNumCompBuf()      { return labelNumCompBuf != null ? labelNumCompBuf[0] : 0; }
+    public long getLabelIdSize()          { return (long) getN() * Integer.BYTES; }
+    public long getRootToSlotSize()       { return (long) getN() * Integer.BYTES; }
+    public long getLabelComponentsSize()  { return (long) PFSFLabelPropCpuSimulator.MAX_COMPONENTS * 12L * Integer.BYTES; }
+    public long getLabelNumCompSize()     { return 2L * Integer.BYTES; }
+
     private void freeGpuResources() {
+        freeLabelProp();
         freeBufferPair(coalescedBuf); coalescedBuf = null;
         freeBufferPair(stagingBuf); stagingBuf = null;
         hostCoalescedBuf = null;

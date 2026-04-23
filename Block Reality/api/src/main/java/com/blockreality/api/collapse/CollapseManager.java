@@ -64,14 +64,58 @@ public class CollapseManager {
     // 連鎖崩塌最大深度 — 由 BRConfig.getCollapseCascadeMaxDepth() 動態讀取
     // 佇列大小上限 — 由 BRConfig.getCollapseQueueMaxSize() 動態讀取
 
-    /**
-     * 崩塌日誌 — 記錄因果鏈，支援 /br journal 查詢與 /br undo 回滾。
+    /** 崩塌日誌 — 記錄因果鏈，支援 /br journal 查詢與 /br undo 回滾。
      * 全域單例：所有維度共享同一日誌（chainId 全域唯一）。
      */
     private static final CollapseJournal JOURNAL = new CollapseJournal();
 
     /** 取得崩塌日誌（供指令層查詢）。 */
     public static CollapseJournal getJournal() { return JOURNAL; }
+
+    // ═════════════════════════════════════════════════════════════
+    //  Orphan-island bridge  (Phase A correctness fix completion)
+    // ═════════════════════════════════════════════════════════════
+    //
+    // StructureIslandRegistry fires an OrphanIslandEvent the instant a
+    // split leaves a fragment with no anchor. Registering this static
+    // listener at class init ensures the fragment is enqueued for
+    // collapse in the SAME tick as the fracture, not the 3–10 tick
+    // delay that PFSF's phi-divergence detection would otherwise take
+    // (the user-reported "floating blocks" bug).
+    //
+    // The listener is a plain static initialiser so it runs on first
+    // CollapseManager class-load; the registry itself performs the
+    // Set<BlockPos> fragment computation, so the listener only has to
+    // translate and dispatch.
+    static {
+        StructureIslandRegistry.setOrphanListener(CollapseManager::onOrphanIsland);
+    }
+
+    /**
+     * Receives orphan-island notifications from {@link StructureIslandRegistry}.
+     *
+     * <p>Enqueues every fragment block as a {@link FailureType#NO_SUPPORT}
+     * collapse so the existing batch pipeline ({@code processQueue},
+     * overflow buffer, particle effects) handles the actual destruction.
+     *
+     * <p>If {@link StructureIslandRegistry.OrphanIslandEvent#level()} is
+     * null (the {@code flushDestructions} path does not propagate a level),
+     * we log once and skip — the caller needs a level to destroy blocks
+     * via Minecraft's API and we have no reliable way to recover it
+     * here. Future refactors may thread a level through that path.
+     */
+    public static void onOrphanIsland(StructureIslandRegistry.OrphanIslandEvent event) {
+        ServerLevel level = event.level();
+        if (level == null) {
+            LOGGER.warn("[Collapse] Orphan island {} ({} blocks) has no ServerLevel (flushDestructions path); cannot enqueue collapse",
+                    event.islandId(), event.members().size());
+            return;
+        }
+        if (event.members().isEmpty()) return;
+        LOGGER.info("[Collapse] Orphan island {} ({} blocks) from tick-local fracture; enqueueing NO_SUPPORT collapse",
+                event.islandId(), event.members().size());
+        enqueueCollapse(level, event.members(), FailureType.NO_SUPPORT);
+    }
 
     /**
      * 坍方佇列 — 超過每 tick 上限的方塊排入此佇列。
