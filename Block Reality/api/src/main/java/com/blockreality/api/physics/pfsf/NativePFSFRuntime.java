@@ -47,6 +47,39 @@ public final class NativePFSFRuntime {
 
     public static IPFSFRuntime asRuntime() { return VIEW; }
 
+    private static void registerRequiredShaders() {
+        String[] shaders = {
+            "pfsf/jacobi_smooth.comp",
+            "pfsf/rbgs_smooth.comp",
+            "pfsf/phase_field_evolve.comp",
+            "pfsf/pcg_matvec.comp",
+            "pfsf/pcg_update.comp",
+            "pfsf/pcg_direction.comp",
+            "pfsf/pcg_dot.comp",
+            "pfsf/pcg_precompute.comp",
+            "pfsf/failure_scan.comp",
+            "pfsf/sparse_scatter.comp"
+        };
+
+        for (String s : shaders) {
+            try {
+                // 尋找由 precompileShaders 產生的 .spv 文件
+                String resourcePath = "/assets/blockreality/shaders/compute/" + s + ".spv";
+                java.io.InputStream in = NativePFSFRuntime.class.getResourceAsStream(resourcePath);
+                if (in != null) {
+                    byte[] bytes = in.readAllBytes();
+                    java.nio.ByteBuffer dbb = java.nio.ByteBuffer.allocateDirect(bytes.length);
+                    dbb.put(bytes);
+                    // 不需要 flip，allocateDirect 已經準備好
+                    String canonicalName = "compute/" + s;
+                    NativePFSFBridge.nativeRegisterShader(canonicalName, dbb);
+                }
+            } catch (Exception e) {
+                LOGGER.error("Failed to register shader: {}", s, e);
+            }
+        }
+    }
+
     public static synchronized void init() {
         if (!INIT_ATTEMPTED.compareAndSet(false, true)) return;
 
@@ -58,6 +91,10 @@ public final class NativePFSFRuntime {
             LOGGER.warn("Native PFSF runtime requested (-D{}=true) but libblockreality_pfsf was not loaded.", ACTIVATION_PROPERTY);
             return;
         }
+
+        // ── 核心修復：手動註冊 Shader ──
+        // 這是因為 L1-native 不再包含嵌入的 Shader，我們必須從 Java 端資源手動注入。
+        registerRequiredShaders();
 
         long h = 0L;
         try {

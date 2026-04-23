@@ -51,7 +51,6 @@ set(PFSF_SOURCES
     src/pfsf_api.cpp
     src/pfsf_engine.cpp
     src/core/vulkan_context.cpp
-    src/core/vulkan_loader_fix.cpp
     src/core/island_buffer.cpp
     src/core/buffer_manager.cpp
     src/solver/jacobi_solver.cpp
@@ -95,7 +94,6 @@ set_target_properties(pfsf_compute PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_definitions(pfsf_compute PRIVATE PFSF_ABI_VERSION_STRING="${PFSF_ABI_VERSION_STRING}")
 
 # ── Library target ──
-# ★ 重要：為了讓 Standalone 連結，我們同時編譯靜體與動態
 add_library(pfsf_static STATIC ${PFSF_SOURCES})
 target_include_directories(pfsf_static PUBLIC include PRIVATE src)
 target_link_libraries(pfsf_static PUBLIC Vulkan::Vulkan PRIVATE VulkanMemoryAllocator)
@@ -126,7 +124,6 @@ endif()
 # --- HARDWARE PROOF ---
 add_executable(pfsf_hardware_proof ../../research/gpu_hardproof.cpp)
 target_include_directories(pfsf_hardware_proof PRIVATE src include C:/Users/wmc02/Desktop/pr_review/pfsf_core/L1-native/build/_deps/vma-src/include)
-# 修正：連結 pfsf_static 以確保所有 symbol 都進入 exe
 target_link_libraries(pfsf_hardware_proof PRIVATE pfsf_static pfsf_compute br_core Vulkan::Vulkan)
 
 # ── Standalone CLI example ──

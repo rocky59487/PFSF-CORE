@@ -84,7 +84,7 @@ Conclusion:
 
 - The native path is reaching the GPU correctly.
 - The failure is in shader packaging and registration, not in Vulkan device discovery.
-- This is the highest-confidence root cause for “GPU cannot actually run PFSF kernels”.
+- This is the highest-confidence root cause for "GPU cannot actually run PFSF kernels".
 
 ## Paper Data Provenance Audit
 
@@ -119,7 +119,7 @@ Implication:
 - The README and calibration report still describe an older calibration state.
 - Any paper text or benchmark discussion that cites both is currently not self-consistent.
 
-### 2. “Real hardware benchmark” wording is not supported by the test semantics
+### 2. "Real hardware benchmark" wording is not supported by the test semantics
 
 `Block Reality/api/build/test-results/pfsfValidate/TEST-com.blockreality.api.physics.validation.RealHardwareBenchmarkTest.xml:1-10` shows:
 
@@ -130,7 +130,7 @@ Implication:
 Implication:
 
 - A green `:api:pfsfValidate` run does not prove the hardware benchmark executed.
-- Treating this suite as “GPU validated” is academically unsafe.
+- Treating this suite as "GPU validated" is academically unsafe.
 
 ## Claim Matrix
 
@@ -138,8 +138,8 @@ Implication:
 |---|---|---|
 | `hField` irreversibility via `max(old, psi_e)` is implemented | `Supported` | `rbgs_smooth.comp.glsl:188-190` and `jacobi_smooth.comp.glsl:209-211` update `hField` monotonically; `phase_field_evolve.comp.glsl:39` declares `hField` readonly and `:109-113` documents read-only use |
 | phase-field evolution is conceptually in the Miehe/Ambati history-field family | `Supported at concept level` | the repo uses a history field and irreversible update pattern consistent with the literature family; compare with [Miehe et al. 2010](https://crm.sns.it/media/course/3060/miehe%2Bhofacker%2Bwelschinger10.pdf) and [Gerasimov & De Lorenzis 2018](https://arxiv.org/abs/1811.05334) |
-| the implementation can be presented as a faithful “Ambati 2015” implementation | `Needs relabeling` | `phase_field_evolve.comp.glsl:10-19` and README language cite Ambati’s review directly, but the repo does not demonstrate equation-by-equation equivalence; safer wording is “Ambati/Miehe-style phase-field evolution” |
-| the exact `0.5 / 1/6` stencil is academically justified by the repo’s cited sources | `Needs relabeling` | current repo says “Shinozaki-Oono standard”, but this audit did not verify an exact primary-source match for that label; the implementation may still be a reasonable isotropic engineering stencil, but the citation needs tightening |
+| the implementation can be presented as a faithful "Ambati 2015" implementation | `Needs relabeling` | `phase_field_evolve.comp.glsl:10-19` and README language cite Ambati's review directly, but the repo does not demonstrate equation-by-equation equivalence; safer wording is "Ambati/Miehe-style phase-field evolution" |
+| the exact `0.5 / 1/6` stencil is academically justified by the repo's cited sources | `Needs relabeling` | current repo says "Shinozaki-Oono standard" but this audit did not verify an exact primary-source match for that label; the implementation may still be a reasonable isotropic engineering stencil, but the citation needs tightening |
 | `performance_metrics.csv` is an empirical CPU-vs-GPU benchmark | `Contradicted by repo data` | GPU values are model outputs, not dispatch timings |
 | `real_hardware_performance.csv` is a real measured benchmark from the current validation suite | `Contradicted by repo data` | current test run passes while producing an empty CSV |
 | `validation_results.csv` is a three-scenario analytic validation set | `Overclaimed` | only cantilever is computed; arch and slab are placeholders |
@@ -170,7 +170,7 @@ Implication:
 
 ## Bottom Line
 
-The repo does not currently support the blanket statement “GPU cannot be used because the machine driver is broken”. The stronger, evidence-backed statement is:
+The repo does not currently support the blanket statement "GPU cannot be used because the machine driver is broken". The stronger, evidence-backed statement is:
 
 - the Java verification path is broken by a Windows-incompatible test environment override, and
 - the native verification path reaches the real GPU but cannot execute PFSF compute kernels because its SPIR-V registry wiring is incomplete.

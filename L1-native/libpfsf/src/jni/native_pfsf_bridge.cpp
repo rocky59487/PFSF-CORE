@@ -506,6 +506,28 @@ Java_com_blockreality_api_physics_pfsf_NativePFSFBridge_nativeNotifySparseUpdate
                                     static_cast<int32_t>(updateCount)));
 }
 
+JNIEXPORT void JNICALL
+Java_com_blockreality_api_physics_pfsf_NativePFSFBridge_nativeRegisterShader(
+        JNIEnv* env, jclass, jstring name, jobject spirv) {
+    if (name == nullptr || spirv == nullptr) return;
+    
+    const char* c_name = env->GetStringUTFChars(name, nullptr);
+    void* addr = env->GetDirectBufferAddress(spirv);
+    jlong capacity = env->GetDirectBufferCapacity(spirv);
+    
+    if (c_name && addr && capacity > 0) {
+        // SPIR-V bytecode is words (uint32_t)
+        br_core::SpirvRegistry::add_deferred_blob(
+            c_name, 
+            static_cast<const uint32_t*>(addr), 
+            static_cast<uint32_t>(capacity / 4)
+        );
+        fprintf(stderr, "[libpfsf] JNI Registered Shader: %s (%lld bytes)\n", c_name, capacity);
+    }
+    
+    if (c_name) env->ReleaseStringUTFChars(name, c_name);
+}
+
 JNIEXPORT jint JNICALL
 Java_com_blockreality_api_physics_pfsf_NativePFSFBridge_nativeDrainCallbacks(
         JNIEnv* env, jclass,

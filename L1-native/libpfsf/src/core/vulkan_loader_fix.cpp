@@ -1,10 +1,9 @@
 /**
  * @file vulkan_loader_fix.cpp
- * @brief 絕對路徑載入器 — 最終調試版。
+ * @brief 強制手動加載系統 Vulkan 驅動。
  */
 #include <windows.h>
 #include <cstdio>
-#include <vulkan/vulkan.h>
 
 namespace pfsf {
     void* manual_vulkan_handle = nullptr;
@@ -12,24 +11,20 @@ namespace pfsf {
     bool force_load_vulkan() {
         if (manual_vulkan_handle) return true;
 
+        // 優先嘗試 System32
         const char* path = "C:\\Windows\\System32\\vulkan-1.dll";
-        HMODULE hModule = LoadLibraryA(path);
+        manual_vulkan_handle = (void*)LoadLibraryA(path);
 
-        if (!hModule) {
-            fprintf(stderr, "[libpfsf] >>> FATAL: LoadLibraryA(%s) failed! Error: %lu\n", path, GetLastError());
-            return false;
+        if (!manual_vulkan_handle) {
+            manual_vulkan_handle = (void*)LoadLibraryA("vulkan-1.dll");
         }
 
-        // 檢查符號是否存在
-        auto pfn = (void*)GetProcAddress(hModule, "vkCreateInstance");
-        if (!pfn) {
-            fprintf(stderr, "[libpfsf] >>> FATAL: vkCreateInstance symbol NOT FOUND in %s!\n", path);
-            FreeLibrary(hModule);
+        if (manual_vulkan_handle) {
+            fprintf(stderr, "[libpfsf] Vulkan Loader found.\n");
+            return true;
+        } else {
+            fprintf(stderr, "[libpfsf] Vulkan Loader NOT FOUND (Error: %lu)\n", GetLastError());
             return false;
         }
-
-        manual_vulkan_handle = (void*)hModule;
-        fprintf(stderr, "[libpfsf] >>> SUCCESS: Vulkan Loader & Symbols verified in System32\n");
-        return true;
     }
 }

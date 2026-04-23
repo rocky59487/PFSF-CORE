@@ -396,6 +396,15 @@ public final class NativePFSFBridge {
                                                         int islandId,
                                                         int updateCount);
 
+    /**
+     * Registers a SPIR-V shader blob into the native br_core registry.
+     * This allows the native C++ solvers to find shaders bundled in the JAR.
+     *
+     * @param name   canonical shader name (e.g. "compute/pfsf/jacobi_smooth.comp")
+     * @param spirv  DirectByteBuffer containing the SPIR-V bytecode.
+     */
+    public static native void nativeRegisterShader(String name, ByteBuffer spirv);
+
     /** libpfsf version string. */
     private static native String nativeVersion();
 
