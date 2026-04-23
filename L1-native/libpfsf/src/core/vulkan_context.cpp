@@ -71,7 +71,7 @@ bool VulkanContext::init() {
     }
 
     if (!selectPhysicalDevice()) {
-        fprintf(stderr, "[libpfsf] 5070TI NOT FOUND!\n");
+        fprintf(stderr, "[libpfsf] No suitable Vulkan physical device found.\n");
         return false;
     }
 
@@ -140,15 +140,55 @@ bool VulkanContext::selectPhysicalDevice() {
     if (count == 0) return false;
     std::vector<VkPhysicalDevice> devices(count);
     vkEnumeratePhysicalDevices(instance_, &count, devices.data());
-    
+
+    VkPhysicalDevice best = VK_NULL_HANDLE;
+    int bestScore = -1;
+    std::string bestName;
+
     for (auto& pd : devices) {
         VkPhysicalDeviceProperties props;
         vkGetPhysicalDeviceProperties(pd, &props);
-        if (props.vendorID == 0x10de) { 
-            physDevice_ = pd; deviceName_ = props.deviceName; return true; 
+
+        // Compute queue family must exist for this device to be usable at all.
+        uint32_t qfCount = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(pd, &qfCount, nullptr);
+        std::vector<VkQueueFamilyProperties> qfs(qfCount);
+        vkGetPhysicalDeviceQueueFamilyProperties(pd, &qfCount, qfs.data());
+        bool hasCompute = false;
+        for (uint32_t i = 0; i < qfCount; i++) {
+            if (qfs[i].queueFlags & VK_QUEUE_COMPUTE_BIT) { hasCompute = true; break; }
+        }
+        if (!hasCompute) continue;
+
+        VkPhysicalDeviceFeatures feats;
+        vkGetPhysicalDeviceFeatures(pd, &feats);
+
+        int score = 0;
+        switch (props.deviceType) {
+            case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:   score += 1000; break;
+            case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: score += 100;  break;
+            case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:    score += 50;   break;
+            default: break;
+        }
+        if (feats.shaderInt64)   score += 50;
+        if (feats.shaderFloat64) score += 25;
+        if (props.apiVersion >= VK_API_VERSION_1_2) score += 30;
+
+        if (score > bestScore) {
+            bestScore = score;
+            best = pd;
+            bestName = props.deviceName;
         }
     }
-    return false;
+
+    if (best == VK_NULL_HANDLE) {
+        fprintf(stderr, "[libpfsf] No Vulkan device with compute queue found among %u candidate(s).\n", count);
+        return false;
+    }
+    physDevice_ = best;
+    deviceName_ = bestName;
+    fprintf(stderr, "[libpfsf] Selected device: %s (score=%d)\n", deviceName_.c_str(), bestScore);
+    return true;
 }
 
 int VulkanContext::findComputeQueueFamily() {
