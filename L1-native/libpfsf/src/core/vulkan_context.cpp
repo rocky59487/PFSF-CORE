@@ -39,13 +39,15 @@ static bool force_load_vulkan() {
 bool VulkanContext::init() {
     if (available_) return true;
 
-    fprintf(stderr, "[libpfsf] --- VULKAN INIT: TARGETING 5070TI ---\n");
+    fprintf(stderr, "[libpfsf] --- VULKAN INIT ---\n");
 
     if (!force_load_vulkan()) return false;
 
-    // ── 三段式版本嘗試 ──
+    // ── Instance: try 1.3 → 1.2 → 1.1, enable properties2 extension when needed
+    const char* kInstanceExts[] = { "VK_KHR_get_physical_device_properties2" };
     uint32_t versions[] = { VK_API_VERSION_1_3, VK_API_VERSION_1_2, VK_API_VERSION_1_1 };
     VkResult last_res = VK_SUCCESS;
+    uint32_t instanceApiVersion = 0;
 
     for (uint32_t ver : versions) {
         VkApplicationInfo appInfo = {};
@@ -56,10 +58,16 @@ bool VulkanContext::init() {
         VkInstanceCreateInfo instCI = {};
         instCI.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
         instCI.pApplicationInfo = &appInfo;
-        
+        if (ver == VK_API_VERSION_1_1) {
+            // Extension only needed on 1.1; 1.2+ has properties2 in core.
+            instCI.enabledExtensionCount = 1;
+            instCI.ppEnabledExtensionNames = kInstanceExts;
+        }
+
         last_res = vkCreateInstance(&instCI, nullptr, &instance_);
         if (last_res == VK_SUCCESS) {
-            fprintf(stderr, "[libpfsf] Instance created with API %d.%d\n", 
+            instanceApiVersion = ver;
+            fprintf(stderr, "[libpfsf] Instance created with API %d.%d\n",
                     VK_VERSION_MAJOR(ver), VK_VERSION_MINOR(ver));
             break;
         }
@@ -79,6 +87,26 @@ bool VulkanContext::init() {
     if (qf < 0) return false;
     computeQueueFamily_ = (uint32_t)qf;
 
+    // ── Query available features so we only enable what the driver supports ──
+    VkPhysicalDeviceFeatures2 feats2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+    VkPhysicalDeviceVulkan12Features feats12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+    bool canUse12Chain = (instanceApiVersion >= VK_API_VERSION_1_2);
+    if (canUse12Chain) feats2.pNext = &feats12;
+    vkGetPhysicalDeviceFeatures2(physDevice_, &feats2);
+
+    // Keep only the features we actually need and the device supports.
+    VkPhysicalDeviceFeatures2 wanted2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+    wanted2.features.shaderInt64   = feats2.features.shaderInt64;
+    wanted2.features.shaderFloat64 = feats2.features.shaderFloat64;
+
+    VkPhysicalDeviceVulkan12Features wanted12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+    if (canUse12Chain) {
+        wanted12.timelineSemaphore        = feats12.timelineSemaphore;
+        wanted12.storageBuffer8BitAccess  = feats12.storageBuffer8BitAccess;
+        wanted12.shaderInt8               = feats12.shaderInt8;
+        wanted2.pNext = &wanted12;
+    }
+
     float qp = 1.0f;
     VkDeviceQueueCreateInfo qCI = {};
     qCI.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
@@ -90,13 +118,18 @@ bool VulkanContext::init() {
     devCI.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     devCI.queueCreateInfoCount = 1;
     devCI.pQueueCreateInfos = &qCI;
-    
+    devCI.pNext = &wanted2;  // features2 chain; do not set pEnabledFeatures when using pNext
+
     if (vkCreateDevice(physDevice_, &devCI, nullptr, &device_) != VK_SUCCESS) {
         fprintf(stderr, "[libpfsf] vkCreateDevice FAILED\n");
         return false;
     }
 
     vkGetDeviceQueue(device_, computeQueueFamily_, 0, &computeQueue_);
+
+    fprintf(stderr, "[libpfsf] Device features enabled: int64=%d float64=%d timelineSem=%d int8=%d storage8bit=%d\n",
+            wanted2.features.shaderInt64, wanted2.features.shaderFloat64,
+            wanted12.timelineSemaphore, wanted12.shaderInt8, wanted12.storageBuffer8BitAccess);
 
     VkCommandPoolCreateInfo cpCI = {};
     cpCI.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -108,7 +141,7 @@ bool VulkanContext::init() {
     }
 
     VmaAllocatorCreateInfo vmaCI = {};
-    vmaCI.vulkanApiVersion = VK_API_VERSION_1_1;
+    vmaCI.vulkanApiVersion = instanceApiVersion >= VK_API_VERSION_1_2 ? VK_API_VERSION_1_2 : VK_API_VERSION_1_1;
     vmaCI.physicalDevice = physDevice_;
     vmaCI.device = device_;
     vmaCI.instance = instance_;
@@ -118,7 +151,7 @@ bool VulkanContext::init() {
     }
 
     available_ = true;
-    fprintf(stderr, "[libpfsf] 🚀 5070TI SUCCESS: %s\n", deviceName_.c_str());
+    fprintf(stderr, "[libpfsf] Vulkan ready on device: %s\n", deviceName_.c_str());
     return true;
 }
 
