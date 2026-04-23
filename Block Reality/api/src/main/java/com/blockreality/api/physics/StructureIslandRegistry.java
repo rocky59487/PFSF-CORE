@@ -4,6 +4,7 @@ import com.blockreality.api.block.RBlockEntity;
 import com.blockreality.api.material.DefaultMaterial;
 import com.blockreality.api.material.RMaterial;
 import com.blockreality.api.physics.PhysicsConstants;
+import com.blockreality.api.physics.pfsf.LabelPropagation;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
@@ -11,6 +12,7 @@ import net.minecraft.world.level.block.entity.BlockEntity;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
 import java.util.ArrayDeque;
 import java.util.Collections;
@@ -22,6 +24,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 import java.util.function.Function;
 
 /**
@@ -54,6 +57,57 @@ public class StructureIslandRegistry {
 
     /** 島嶼 ID → 島嶼資訊 */
     private static final ConcurrentHashMap<Integer, StructureIsland> islands = new ConcurrentHashMap<>();
+
+    /**
+     * 錨點方塊集合（bedrock / barrier / explicitly-pinned）。用於 split 後判定
+     * 新 island 是否仍連通至錨點；無錨者即為 orphan，必須立即觸發掉落。
+     * 維護由 {@link #registerAnchor} / {@link #unregisterAnchor} 負責；呼叫方為
+     * {@code AnchorContinuityChecker} 所在的 chunk-load / block-update 流程。
+     */
+    private static final Set<BlockPos> anchorBlocks = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Split 後產生、無任何錨點連通的新 island 會透過此 listener 通知。
+     * 實務上由 {@code CollapseManager} 安裝，立即整個拆除該 island。
+     * 若未安裝（如單元測試情境），不會有任何副作用，僅記錄 WARN log。
+     */
+    @Nullable
+    private static volatile Consumer<OrphanIslandEvent> orphanListener = null;
+
+    /**
+     * 將於 split 結束時傳送給 {@link #orphanListener} 的事件。
+     * {@code level} 為觸發本次 split 的 ServerLevel（若呼叫者有提供，
+     * 例如 {@link #unregisterBlock}）；{@code flushDestructions} 無此資訊
+     * 時為 {@code null}，由 listener 自行 fallback 查詢。
+     */
+    public record OrphanIslandEvent(int islandId,
+                                    Set<BlockPos> members,
+                                    long epoch,
+                                    @Nullable ServerLevel level) {}
+
+    /** 安裝 orphan listener（無則以 null 解除）。 */
+    public static void setOrphanListener(@Nullable Consumer<OrphanIslandEvent> listener) {
+        orphanListener = listener;
+    }
+
+    /** 將 {@code pos} 標記為錨點（若此前未登錄）。執行緒安全；可重複呼叫。 */
+    public static void registerAnchor(BlockPos pos) {
+        anchorBlocks.add(pos.immutable());
+    }
+
+    /** 取消錨點登錄。若此前未登錄則為 no-op。 */
+    public static void unregisterAnchor(BlockPos pos) {
+        anchorBlocks.remove(pos);
+    }
+
+    /** 僅供測試：清除全部狀態（含錨點與 listener）以確保測試獨立性。 */
+    public static void resetForTesting() {
+        blockToIsland.clear();
+        islands.clear();
+        anchorBlocks.clear();
+        orphanListener = null;
+        nextIslandId.set(1);
+    }
 
     /**
      * 結構島嶼 — 一組連通的 RBlock。
@@ -285,112 +339,15 @@ public class StructureIslandRegistry {
         }
         markDirty(removedIslandId); // ALWAYS_DIRTY — block removed, must re-solve
 
-        // 收集仍在 island 中的鄰居
-        List<BlockPos> rblockNeighbors = new java.util.ArrayList<>();
-        for (Direction dir : Direction.values()) {
-            BlockPos neighbor = pos.relative(dir);
-            if (island.members.contains(neighbor)) {
-                rblockNeighbors.add(neighbor);
-            }
-        }
-
-        if (rblockNeighbors.size() <= 1) {
-            // 0 或 1 個鄰居 → 不可能分裂
-            island.recalculateBounds();
-            return Collections.singletonList(removedIslandId);
-        }
-
-        // 多個鄰居 → BFS 檢查是否仍然連通
-        // 從第一個鄰居做 BFS，看能否到達所有其他鄰居
-        Set<BlockPos> reachable = new HashSet<>();
-        Deque<BlockPos> queue = new ArrayDeque<>();
-        BlockPos seed = rblockNeighbors.get(0);
-        reachable.add(seed);
-        queue.add(seed);
-
-        // ★ audit-fix C-3: BFS 預算設為 island 實際大小（無人為截斷）。
-        // 原先 min(size, 65536) 在大型結構中截斷 BFS，導致未遍歷到的鄰居
-        // 被誤判為不可達，觸發錯誤分裂。island.members 已在記憶體中，
-        // O(N) BFS 不會造成效能問題。
-        int budget = island.getBlockCount();
-        int visited = 0;
-
-        while (!queue.isEmpty() && visited < budget) {
-            BlockPos current = queue.poll();
-            visited++;
-            for (Direction dir : Direction.values()) {
-                BlockPos next = current.relative(dir);
-                if (!reachable.contains(next) && island.members.contains(next)) {
-                    reachable.add(next);
-                    queue.add(next);
-                }
-            }
-        }
-
-        // 檢查是否所有鄰居都可達
-        boolean allReachable = true;
-        for (BlockPos neighbor : rblockNeighbors) {
-            if (!reachable.contains(neighbor)) {
-                allReachable = false;
-                break;
-            }
-        }
-
-        if (allReachable) {
-            // 仍然連通 → 只需更新 AABB
-            island.recalculateBounds();
-            return Collections.singletonList(removedIslandId);
-        }
-
-        // 需要分裂！
-        // 將 reachable 集合保留在原 island，其餘方塊建立新 island
-        Set<BlockPos> remaining = new HashSet<>(island.members);
-        remaining.removeAll(reachable);
-
-        // ★ audit-fix M-1: 先加入新成員再移除舊成員（避免 clear→addAll 的中間空狀態）。
-        // 雖然 @ThreadSafe 標記要求所有修改在 server thread，但防禦性編碼更安全。
-        // retainAll 等效於 clear+addAll 但對 ConcurrentHashMap.KeySetView 也不是原子的，
-        // 因此改為：先加所有 reachable（大多已存在，addAll 是冪等的），再 retainAll 移除非 reachable。
-        island.members.retainAll(reachable);
-        island.recalculateBounds();
-        markDirty(removedIslandId); // preserve ALWAYS_DIRTY — split path must not downgrade to structure epoch
-
-        // 對剩餘方塊做 BFS 分群（可能分裂成多個 island）
-        List<Integer> resultIds = new java.util.ArrayList<>();
-        resultIds.add(removedIslandId);
-
-        Set<BlockPos> unassigned = new HashSet<>(remaining);
-        while (!unassigned.isEmpty()) {
-            BlockPos start = unassigned.iterator().next();
-            int newId = nextIslandId.getAndIncrement();
-            StructureIsland newIsland = new StructureIsland(newId);
-
-            Deque<BlockPos> splitQueue = new ArrayDeque<>();
-            splitQueue.add(start);
-            unassigned.remove(start);
-
-            while (!splitQueue.isEmpty()) {
-                BlockPos current = splitQueue.poll();
-                newIsland.addMember(current);
-                blockToIsland.put(current, newId);
-
-                for (Direction dir : Direction.values()) {
-                    BlockPos next = current.relative(dir);
-                    if (unassigned.remove(next)) {
-                        splitQueue.add(next);
-                    }
-                }
-            }
-
-            newIsland.touch(epoch);
-            islands.put(newId, newIsland);
-            // ★ audit-fix C-5: 新分裂的 island 必須標記 dirty，否則物理不會重算
-            markDirty(newId);
-            resultIds.add(newId);
-            LOGGER.info("[IslandRegistry] Split: new island {} with {} blocks from island {}",
-                newId, newIsland.getBlockCount(), removedIslandId);
-        }
-        return resultIds;
+        // Whether or not the removal looks like it could fragment the
+        // island, delegate to the LabelPropagation-backed split path,
+        // which (a) finds all connected components in one pass,
+        // (b) classifies each as anchored / orphan using the registry's
+        // anchor set, (c) notifies the orphan listener for any orphan
+        // fragment in the same tick as the fracture. This is the
+        // correctness fix for the "floating blocks persist for several
+        // ticks" symptom reported by the user.
+        return checkAndSplitIsland(island, removedIslandId, epoch, level);
     }
 
     // ═══════════════════════════════════════════════════════
@@ -573,78 +530,142 @@ public class StructureIslandRegistry {
      * @param epoch    本次操作的 epoch
      * @return 操作後仍存在的所有 island ID（原 island + 分裂出的新 island）
      */
+    /**
+     * Recompute the island's connectivity using {@link LabelPropagation}
+     * and, if the set has fragmented, create new islands for each
+     * disconnected component.
+     *
+     * <p>The critical correctness improvement over the prior single-seed
+     * BFS: each resulting component is independently classified as
+     * anchored or orphan by consulting {@link #anchorBlocks}. Any
+     * orphan component is reported to {@link #orphanListener}
+     * <b>in the same tick as the fracture</b>, so CollapseManager can
+     * collapse the fragment immediately instead of waiting for the
+     * PFSF potential field to diverge past {@code PHI_ORPHAN_THRESHOLD}
+     * over the next several ticks — that delay is the "floating-block
+     * ghost" documented in the GPU audit.
+     */
     private static List<Integer> checkAndSplitIsland(StructureIsland island, int islandId, long epoch) {
-        if (island.getBlockCount() <= 1) {
+        return checkAndSplitIsland(island, islandId, epoch, null);
+    }
+
+    private static List<Integer> checkAndSplitIsland(StructureIsland island,
+                                                     int islandId,
+                                                     long epoch,
+                                                     @Nullable ServerLevel level) {
+        if (island.getBlockCount() == 0) {
+            islands.remove(islandId);
+            return Collections.emptyList();
+        }
+        if (island.getBlockCount() == 1) {
             island.recalculateBounds();
+            BlockPos only = island.members.iterator().next();
+            boolean anchored = isBlockAnchored(only);
+            if (!anchored) {
+                notifyOrphan(islandId, Set.of(only), epoch, level);
+            }
             return Collections.singletonList(islandId);
         }
 
-        // 從任意成員出發 BFS，計算可達集合
-        BlockPos seed = island.members.iterator().next();
-        Set<BlockPos> reachable = new HashSet<>();
-        Deque<BlockPos> bfsQueue = new ArrayDeque<>();
-        reachable.add(seed);
-        bfsQueue.add(seed);
+        // Authoritative partition: SV-equivalent BFS over the island's
+        // current member set with anchor-adjacency check folded in.
+        LabelPropagation.PartitionResult partition = LabelPropagation.bfsComponents(
+                new HashSet<>(island.members),
+                anchorBlocks,
+                LabelPropagation.NeighborPolicy.FACE_6);
 
-        while (!bfsQueue.isEmpty()) {
-            BlockPos current = bfsQueue.poll();
-            for (Direction dir : Direction.values()) {
-                BlockPos next = current.relative(dir);
-                if (!reachable.contains(next) && island.members.contains(next)) {
-                    reachable.add(next);
-                    bfsQueue.add(next);
-                }
+        if (partition.components().size() == 1) {
+            // Still a single connected component. Update AABB; if the
+            // whole component is now orphan (e.g. its only anchor was
+            // just removed), surface it to the orphan listener.
+            island.recalculateBounds();
+            LabelPropagation.Component sole = partition.components().get(0);
+            if (!sole.anchored()) {
+                notifyOrphan(islandId, sole.members(), epoch, level);
+            }
+            return Collections.singletonList(islandId);
+        }
+
+        // Fragmented: pick one component to keep in the original island.
+        // Prefer an anchored component so the original ID stays attached
+        // to the "main" structure; otherwise keep the largest.
+        int keepIdx = 0;
+        boolean keepAnchored = partition.components().get(0).anchored();
+        int keepSize = partition.components().get(0).members().size();
+        for (int i = 1; i < partition.components().size(); i++) {
+            LabelPropagation.Component c = partition.components().get(i);
+            boolean better = (c.anchored() && !keepAnchored)
+                    || (c.anchored() == keepAnchored && c.members().size() > keepSize);
+            if (better) {
+                keepIdx = i;
+                keepAnchored = c.anchored();
+                keepSize = c.members().size();
             }
         }
 
-        if (reachable.size() == island.getBlockCount()) {
-            island.recalculateBounds(); // 仍然連通，只更新 AABB
-            return Collections.singletonList(islandId);
-        }
-
-        // 需要分裂：reachable 留在原 island，其餘建立新 island
-        Set<BlockPos> remaining = new HashSet<>(island.members);
-        remaining.removeAll(reachable);
-
-        island.members.retainAll(reachable);
+        LabelPropagation.Component keep = partition.components().get(keepIdx);
+        island.members.retainAll(keep.members());
         island.recalculateBounds();
-        markDirty(islandId); // preserve ALWAYS_DIRTY — split path must not downgrade to structure epoch
+        markDirty(islandId);
 
         List<Integer> resultIds = new java.util.ArrayList<>();
         resultIds.add(islandId);
+        if (!keep.anchored()) {
+            // Even the "kept" component is orphan — tell CollapseManager.
+            notifyOrphan(islandId, keep.members(), epoch, level);
+        }
 
-        // BFS 分群剩餘方塊（可能形成多個 island）
-        Set<BlockPos> unassigned = new HashSet<>(remaining);
-        while (!unassigned.isEmpty()) {
-            BlockPos start = unassigned.iterator().next();
+        for (int i = 0; i < partition.components().size(); i++) {
+            if (i == keepIdx) continue;
+            LabelPropagation.Component c = partition.components().get(i);
             int newId = nextIslandId.getAndIncrement();
             StructureIsland newIsland = new StructureIsland(newId);
-
-            Deque<BlockPos> splitQueue = new ArrayDeque<>();
-            splitQueue.add(start);
-            unassigned.remove(start);
-
-            while (!splitQueue.isEmpty()) {
-                BlockPos current = splitQueue.poll();
-                newIsland.addMember(current);
-                blockToIsland.put(current, newId);
-
-                for (Direction dir : Direction.values()) {
-                    BlockPos next = current.relative(dir);
-                    if (unassigned.remove(next)) {
-                        splitQueue.add(next);
-                    }
-                }
+            for (BlockPos p : c.members()) {
+                newIsland.addMember(p);
+                blockToIsland.put(p, newId);
             }
-
             newIsland.touch(epoch);
             islands.put(newId, newIsland);
             markDirty(newId);
             resultIds.add(newId);
-            LOGGER.info("[IslandRegistry] Split: new island {} with {} blocks from island {}",
-                newId, newIsland.getBlockCount(), islandId);
+            LOGGER.info("[IslandRegistry] Split: new island {} with {} blocks from island {} (anchored={})",
+                    newId, c.members().size(), islandId, c.anchored());
+            if (!c.anchored()) {
+                notifyOrphan(newId, c.members(), epoch, level);
+            }
         }
         return resultIds;
+    }
+
+    /**
+     * True iff {@code pos} itself is a registered anchor, or a face-
+     * neighbour is. Matches the semantics of
+     * {@link LabelPropagation#bfsComponents} with
+     * {@link LabelPropagation.NeighborPolicy#FACE_6}.
+     */
+    private static boolean isBlockAnchored(BlockPos pos) {
+        if (anchorBlocks.contains(pos)) return true;
+        for (Direction d : Direction.values()) {
+            if (anchorBlocks.contains(pos.relative(d))) return true;
+        }
+        return false;
+    }
+
+    private static void notifyOrphan(int islandId,
+                                     Set<BlockPos> members,
+                                     long epoch,
+                                     @Nullable ServerLevel level) {
+        Consumer<OrphanIslandEvent> listener = orphanListener;
+        if (listener == null) {
+            LOGGER.warn("[IslandRegistry] Orphan island {} ({} blocks) detected but no listener installed; blocks may stay suspended until PFSF phi diverges",
+                    islandId, members.size());
+            return;
+        }
+        try {
+            listener.accept(new OrphanIslandEvent(islandId, Set.copyOf(members), epoch, level));
+        } catch (Throwable t) {
+            LOGGER.error("[IslandRegistry] Orphan listener threw for island " + islandId, t);
+        }
     }
 
     /** 診斷用統計資訊 */
