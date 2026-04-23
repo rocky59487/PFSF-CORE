@@ -45,6 +45,8 @@ public final class NativePFSFRuntime {
 
     private static volatile long    handle = 0L;
     private static volatile boolean active = false;
+    private static volatile int     shadersRegistered = 0;
+    private static volatile int     shadersMissing    = 0;
 
     private static final RuntimeView VIEW = new RuntimeView();
 
@@ -56,10 +58,12 @@ public final class NativePFSFRuntime {
     public static boolean isFlagEnabled()   { return FLAG_ENABLED; }
     public static boolean isLibraryLoaded() { return NativePFSFBridge.isAvailable(); }
     public static boolean areKernelsPorted(){ return KERNELS_PORTED; }
+    public static int     getShadersRegistered() { return shadersRegistered; }
+    public static int     getShadersMissing()    { return shadersMissing; }
 
     public static IPFSFRuntime asRuntime() { return VIEW; }
 
-    private static void registerRequiredShaders() {
+    private static boolean registerRequiredShaders() {
         String[] shaders = {
             "pfsf/jacobi_smooth.comp",
             "pfsf/rbgs_smooth.comp",
@@ -73,23 +77,39 @@ public final class NativePFSFRuntime {
             "pfsf/sparse_scatter.comp"
         };
 
+        int registered = 0, missing = 0;
         for (String s : shaders) {
-            try {
-                // 尋找由 precompileShaders 產生的 .spv 文件
-                String resourcePath = "/assets/blockreality/shaders/compute/" + s + ".spv";
-                java.io.InputStream in = NativePFSFRuntime.class.getResourceAsStream(resourcePath);
-                if (in != null) {
-                    byte[] bytes = in.readAllBytes();
-                    java.nio.ByteBuffer dbb = java.nio.ByteBuffer.allocateDirect(bytes.length);
-                    dbb.put(bytes);
-                    // 不需要 flip，allocateDirect 已經準備好
-                    String canonicalName = "compute/" + s;
-                    NativePFSFBridge.nativeRegisterShader(canonicalName, dbb);
+            String resourcePath = "/assets/blockreality/shaders/compute/" + s + ".spv";
+            try (java.io.InputStream in = NativePFSFRuntime.class.getResourceAsStream(resourcePath)) {
+                if (in == null) {
+                    missing++;
+                    LOGGER.error("Shader missing from jar: {} (run :api:precompileShaders?)", resourcePath);
+                    continue;
                 }
+                byte[] bytes = in.readAllBytes();
+                java.nio.ByteBuffer dbb = java.nio.ByteBuffer.allocateDirect(bytes.length);
+                dbb.put(bytes);
+                dbb.flip();  // reset position so native GetDirectBufferAddress reads from 0
+                String canonicalName = "compute/" + s;
+                NativePFSFBridge.nativeRegisterShader(canonicalName, dbb);
+                registered++;
             } catch (Exception e) {
+                missing++;
                 LOGGER.error("Failed to register shader: {}", s, e);
             }
         }
+        shadersRegistered = registered;
+        shadersMissing    = missing;
+        if (registered == 0) {
+            LOGGER.error("No PFSF shaders registered; physics will not function. Expected {} shaders.", shaders.length);
+            return false;
+        }
+        if (missing > 0) {
+            LOGGER.warn("PFSF shader registration incomplete: registered={}, missing={}", registered, missing);
+        } else {
+            LOGGER.info("PFSF shaders registered: {}/{}", registered, shaders.length);
+        }
+        return true;
     }
 
     public static synchronized void init() {
@@ -106,9 +126,9 @@ public final class NativePFSFRuntime {
         }
         LOGGER.info("Native PFSF runtime enabling (KERNELS_PORTED={})", KERNELS_PORTED);
 
-        // ── 核心修復：手動註冊 Shader ──
-        // 這是因為 L1-native 不再包含嵌入的 Shader，我們必須從 Java 端資源手動注入。
-        registerRequiredShaders();
+        if (!registerRequiredShaders()) {
+            return;
+        }
 
         long h = 0L;
         try {
