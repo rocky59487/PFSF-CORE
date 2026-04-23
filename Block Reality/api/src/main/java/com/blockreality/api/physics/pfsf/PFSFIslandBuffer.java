@@ -121,6 +121,11 @@ public class PFSFIslandBuffer {
     private long[] rootToSlotBuf;
     private long[] labelComponentsBuf;
     private long[] labelNumCompBuf;
+    // Host-visible staging for the per-tick readback (label_prop summarise output).
+    // Keeping them per-island (persistent) rather than per-frame avoids coupling
+    // ComputeFrame's layout to this feature.
+    private long[] labelNumCompStagingBuf;       // 8 bytes  [count, overflow]
+    private long[] labelComponentsStagingBuf;    // 48 × MAX_COMPONENTS bytes
     private boolean labelPropAllocated = false;
 
     AMGPreconditioner amgPreconditioner;
@@ -277,7 +282,10 @@ public class PFSFIslandBuffer {
         rootToSlotBuf       = VulkanComputeContext.allocateDeviceBuffer(uintN, storageUsage);
         labelComponentsBuf  = VulkanComputeContext.allocateDeviceBuffer(componentsSize, storageUsage);
         labelNumCompBuf     = VulkanComputeContext.allocateDeviceBuffer(numCompSize, storageUsage);
-        if (labelIdBuf == null || rootToSlotBuf == null || labelComponentsBuf == null || labelNumCompBuf == null) {
+        labelNumCompStagingBuf    = VulkanComputeContext.allocateStagingBuffer(numCompSize);
+        labelComponentsStagingBuf = VulkanComputeContext.allocateStagingBuffer(componentsSize);
+        if (labelIdBuf == null || rootToSlotBuf == null || labelComponentsBuf == null
+                || labelNumCompBuf == null || labelNumCompStagingBuf == null || labelComponentsStagingBuf == null) {
             LOGGER.error("[PFSF] Island {} label-prop buffer allocation failed; feature disabled for this island", islandId);
             freeLabelProp();
             return;
@@ -287,10 +295,12 @@ public class PFSFIslandBuffer {
 
     /** Release the label-propagation buffers. Idempotent. */
     public void freeLabelProp() {
-        freeBufferPair(labelIdBuf);         labelIdBuf = null;
-        freeBufferPair(rootToSlotBuf);      rootToSlotBuf = null;
-        freeBufferPair(labelComponentsBuf); labelComponentsBuf = null;
-        freeBufferPair(labelNumCompBuf);    labelNumCompBuf = null;
+        freeBufferPair(labelIdBuf);                 labelIdBuf = null;
+        freeBufferPair(rootToSlotBuf);              rootToSlotBuf = null;
+        freeBufferPair(labelComponentsBuf);         labelComponentsBuf = null;
+        freeBufferPair(labelNumCompBuf);            labelNumCompBuf = null;
+        freeBufferPair(labelNumCompStagingBuf);     labelNumCompStagingBuf = null;
+        freeBufferPair(labelComponentsStagingBuf);  labelComponentsStagingBuf = null;
         labelPropAllocated = false;
     }
 
@@ -308,6 +318,11 @@ public class PFSFIslandBuffer {
     public long getRootToSlotSize()       { return (long) getN() * Integer.BYTES; }
     public long getLabelComponentsSize()  { return (long) PFSFLabelPropCpuSimulator.MAX_COMPONENTS * 12L * Integer.BYTES; }
     public long getLabelNumCompSize()     { return 2L * Integer.BYTES; }
+    /** Host-visible staging buffers — handle + memory allocation returned by VMA. */
+    public long getLabelNumCompStagingHandle()    { return labelNumCompStagingBuf != null ? labelNumCompStagingBuf[1] : 0; }
+    public long getLabelNumCompStagingBuffer()    { return labelNumCompStagingBuf != null ? labelNumCompStagingBuf[0] : 0; }
+    public long getLabelComponentsStagingHandle() { return labelComponentsStagingBuf != null ? labelComponentsStagingBuf[1] : 0; }
+    public long getLabelComponentsStagingBuffer() { return labelComponentsStagingBuf != null ? labelComponentsStagingBuf[0] : 0; }
 
     private void freeGpuResources() {
         freeLabelProp();

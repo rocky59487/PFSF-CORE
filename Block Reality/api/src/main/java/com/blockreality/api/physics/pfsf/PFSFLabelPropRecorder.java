@@ -174,6 +174,48 @@ public final class PFSFLabelPropRecorder {
             vkCmdDispatch(cmdBuf, ceilDiv(N, 256), 1, 1);
         }
         VulkanComputeContext.computeBarrier(cmdBuf);
+
+        // Step 5: stage the summary outputs into host-visible memory so the
+        // post-fence callback in PFSFResultProcessor can read them without
+        // another command submission.
+        if (buf.getLabelNumCompStagingBuffer() != 0 && buf.getLabelComponentsStagingBuffer() != 0) {
+            try (MemoryStack stack = MemoryStack.stackPush()) {
+                org.lwjgl.vulkan.VkBufferCopy.Buffer numRegion =
+                        org.lwjgl.vulkan.VkBufferCopy.calloc(1, stack)
+                                .srcOffset(0).dstOffset(0).size(buf.getLabelNumCompSize());
+                vkCmdCopyBuffer(cmdBuf, buf.getLabelNumCompBuf(), buf.getLabelNumCompStagingBuffer(), numRegion);
+
+                org.lwjgl.vulkan.VkBufferCopy.Buffer compRegion =
+                        org.lwjgl.vulkan.VkBufferCopy.calloc(1, stack)
+                                .srcOffset(0).dstOffset(0).size(buf.getLabelComponentsSize());
+                vkCmdCopyBuffer(cmdBuf, buf.getLabelComponentsBuf(), buf.getLabelComponentsStagingBuffer(), compRegion);
+            }
+        }
+    }
+
+    /**
+     * Post-fence readback: maps the staging buffers, decodes into a
+     * {@link DecodedComponents} record, unmaps, and returns.
+     *
+     * <p>Must be called only after the fence associated with the submit
+     * that recorded this island's label-prop work has signalled. Safe to
+     * call multiple times — maps are idempotent as long as the underlying
+     * allocation is `HOST_VISIBLE | HOST_COHERENT` (VMA staging default).
+     */
+    public static DecodedComponents readbackAfterFence(PFSFIslandBuffer buf) {
+        if (!buf.isLabelPropAllocated()) {
+            return new DecodedComponents(0, false, new PFSFLabelPropCpuSimulator.ComponentMeta[0]);
+        }
+        ByteBuffer numCompBytes = VulkanComputeContext.mapBuffer(
+                buf.getLabelNumCompStagingHandle(), buf.getLabelNumCompSize());
+        ByteBuffer componentsBytes = VulkanComputeContext.mapBuffer(
+                buf.getLabelComponentsStagingHandle(), buf.getLabelComponentsSize());
+        try {
+            return decodeComponents(numCompBytes, componentsBytes);
+        } finally {
+            VulkanComputeContext.unmapBuffer(buf.getLabelNumCompStagingHandle());
+            VulkanComputeContext.unmapBuffer(buf.getLabelComponentsStagingHandle());
+        }
     }
 
     // ═════════════════════════════════════════════════════════════════
