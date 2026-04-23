@@ -60,6 +60,14 @@ public final class TopologicalSVDAG {
         final int originX, originY, originZ;
         final int size;  // in voxels; size == LEAF_SIZE for leaves
 
+        /**
+         * Cached connectivity summary populated by {@code R.3}'s refresh
+         * pass. Null until first populated; stale between a voxel write
+         * and the matching {@code recomputePath} call. {@code R.3}'s
+         * {@link TopologicalSVDAG#setVoxel} keeps it in lock-step.
+         */
+        ConnectivitySummary summary;
+
         Node(int ox, int oy, int oz, int size) {
             this.originX = ox; this.originY = oy; this.originZ = oz;
             this.size = size;
@@ -69,12 +77,26 @@ public final class TopologicalSVDAG {
         public final int getOriginY() { return originY; }
         public final int getOriginZ() { return originZ; }
         public final int getSize()    { return size;    }
+        public final ConnectivitySummary getSummary() { return summary; }
 
         public boolean contains(int x, int y, int z) {
             return x >= originX && x < originX + size
                 && y >= originY && y < originY + size
                 && z >= originZ && z < originZ + size;
         }
+    }
+
+    /**
+     * An axis-aligned dirty region surfaced by {@link #drainDirtyRegions}.
+     * Represents a subtree whose connectivity summary changed as a
+     * result of voxel writes since the last drain. Tier 2 (the Poisson
+     * oracle) uses this AABB to decide how much of the voxel field to
+     * re-solve.
+     */
+    public record DirtyRegion(int minX, int minY, int minZ, int size) {
+        public int maxX() { return minX + size; }
+        public int maxY() { return minY + size; }
+        public int maxZ() { return minZ + size; }
     }
 
     /** Internal octree node. Up to 8 children, indexed by octant bits. */
@@ -132,6 +154,14 @@ public final class TopologicalSVDAG {
     /** True once any voxel has been written. */
     private boolean initialised = false;
 
+    /**
+     * Subtree AABBs whose connectivity summary changed since the last
+     * {@link #drainDirtyRegions} call. Using a list means duplicates are
+     * possible if the same subtree is touched twice, but each drain
+     * deduplicates into a set before returning.
+     */
+    private final java.util.List<DirtyRegion> pendingDirty = new java.util.ArrayList<>();
+
     public Node getRoot() { return root; }
     public int getRootLevel() { return rootLevel; }
     public int getDomainSize() { return root == null ? 0 : root.size; }
@@ -167,6 +197,69 @@ public final class TopologicalSVDAG {
         } else {
             writeVoxel(root, x, y, z, type);
         }
+        // Propagate connectivity metadata from leaf to root. We short-
+        // circuit as soon as a node's summary is semantically unchanged,
+        // so writes inside a dense block (e.g. filling in a pre-SOLID
+        // voxel that the leaf already counted through its neighbours)
+        // cost O(1) above the leaf.
+        recomputePath(root, x, y, z);
+    }
+
+    /**
+     * Drain the accumulated set of subtree AABBs whose connectivity
+     * summary changed since the previous call. Deduplicates; the
+     * returned set is a fresh instance and not aliased to internal state.
+     */
+    public java.util.Set<DirtyRegion> drainDirtyRegions() {
+        java.util.Set<DirtyRegion> out = new java.util.LinkedHashSet<>(pendingDirty);
+        pendingDirty.clear();
+        return out;
+    }
+
+    /**
+     * Visible for testing: inspect the current pending set without
+     * clearing it. Unit tests use this to assert summary-change
+     * behaviour without committing to the drain semantics.
+     */
+    public java.util.List<DirtyRegion> peekDirtyRegions() {
+        return java.util.Collections.unmodifiableList(pendingDirty);
+    }
+
+    /**
+     * Bottom-up summary refresh for the node containing {@code (x,y,z)}.
+     * Returns {@code true} iff this node's summary semantically changed.
+     * If not, parent short-circuits (its own summary cannot have
+     * changed either because only this child was touched).
+     */
+    private boolean recomputePath(Node n, int x, int y, int z) {
+        if (n instanceof LeafNode leaf) {
+            ConnectivitySummary old = leaf.summary;
+            ConnectivitySummary fresh = ConnectivityAlgebra.buildFromLeaf(leaf.voxels);
+            if (old != null && old.semanticallyEquals(fresh)) return false;
+            leaf.summary = fresh;
+            pendingDirty.add(new DirtyRegion(leaf.originX, leaf.originY, leaf.originZ, leaf.size));
+            return true;
+        }
+        InternalNode internal = (InternalNode) n;
+        int half = internal.childSize();
+        int ox = (x >= internal.originX + half) ? 1 : 0;
+        int oy = (y >= internal.originY + half) ? 1 : 0;
+        int oz = (z >= internal.originZ + half) ? 1 : 0;
+        int octant = (ox << 2) | (oy << 1) | oz;
+        Node child = internal.children[octant];
+        if (child == null) return false;
+        boolean childChanged = recomputePath(child, x, y, z);
+        if (!childChanged) return false;
+        ConnectivitySummary[] childSums = new ConnectivitySummary[8];
+        for (int i = 0; i < 8; i++) {
+            if (internal.children[i] != null) childSums[i] = internal.children[i].summary;
+        }
+        ConnectivitySummary old = internal.summary;
+        ConnectivitySummary fresh = ConnectivityAlgebra.combine(childSums, half);
+        if (old != null && old.semanticallyEquals(fresh)) return false;
+        internal.summary = fresh;
+        pendingDirty.add(new DirtyRegion(internal.originX, internal.originY, internal.originZ, internal.size));
+        return true;
     }
 
     /**

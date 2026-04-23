@@ -105,6 +105,48 @@ public final class ConnectivitySummary {
     }
 
     /**
+     * Content-based equivalence used by {@code TopologicalSVDAG} to
+     * decide whether a refresh changed the node's summary at all.
+     * Ignores the identity of component ids — if two summaries have
+     * the same partition of face voxels into classes and the same
+     * anchor flags, they are equivalent even though their raw label
+     * integers may differ (both are opaque).
+     */
+    public boolean semanticallyEquals(ConnectivitySummary other) {
+        if (other == null) return false;
+        if (size != other.size) return false;
+        if (blockCount != other.blockCount) return false;
+        if (componentCount != other.componentCount) return false;
+        // Check anchor bits length and content up to componentCount.
+        int nWords = (componentCount >>> 6) + 1;
+        for (int w = 0; w < nWords; w++) {
+            long a = w < anchorBits.length ? anchorBits[w] : 0L;
+            long b = w < other.anchorBits.length ? other.anchorBits[w] : 0L;
+            if (a != b) return false;
+        }
+        // Compare face partitions up to label renaming.
+        // Build a label bijection on the fly; if any face position
+        // contradicts an earlier mapping, partitions differ.
+        int[] map = new int[componentCount + 1];
+        int[] inv = new int[componentCount + 1];
+        for (int f = 0; f < FACE_COUNT; f++) {
+            int[] a = faceLabels[f];
+            int[] b = other.faceLabels[f];
+            for (int i = 0; i < a.length; i++) {
+                int la = a[i], lb = b[i];
+                if (la == 0 && lb == 0) continue;
+                if (la == 0 || lb == 0) return false;
+                if (map[la] == 0 && inv[lb] == 0) {
+                    map[la] = lb; inv[lb] = la;
+                } else if (map[la] != lb || inv[lb] != la) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /**
      * Map a 3D in-subtree voxel coordinate to a face index + (u, v)
      * pair if the voxel sits exactly on one of the subtree's faces.
      * Returns -1 if the voxel is strictly inside. Interior voxels on
