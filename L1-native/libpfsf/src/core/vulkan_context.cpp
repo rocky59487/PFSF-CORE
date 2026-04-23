@@ -150,6 +150,8 @@ bool VulkanContext::init() {
         return false;
     }
 
+    tryCreateTimelineSemaphore();
+
     available_ = true;
     fprintf(stderr, "[libpfsf] Vulkan ready on device: %s\n", deviceName_.c_str());
     return true;
@@ -199,6 +201,8 @@ bool VulkanContext::initFromExisting(VkInstance inst,
         return false;
     }
 
+    tryCreateTimelineSemaphore();
+
     available_ = true;
     fprintf(stderr, "[libpfsf] Vulkan adopted from Java host on device: %s\n", deviceName_.c_str());
     return true;
@@ -207,6 +211,10 @@ bool VulkanContext::initFromExisting(VkInstance inst,
 void VulkanContext::shutdown() {
     if (device_) {
         vkDeviceWaitIdle(device_);
+        if (timelineSem_ != VK_NULL_HANDLE) {
+            vkDestroySemaphore(device_, timelineSem_, nullptr);
+            timelineSem_ = VK_NULL_HANDLE;
+        }
         if (allocator_) vmaDestroyAllocator(allocator_);
         if (cmdPool_) vkDestroyCommandPool(device_, cmdPool_, nullptr);
         if (ownsHandles_) vkDestroyDevice(device_, nullptr);
@@ -214,6 +222,7 @@ void VulkanContext::shutdown() {
     if (instance_ && ownsHandles_) vkDestroyInstance(instance_, nullptr);
     instance_ = VK_NULL_HANDLE; device_ = VK_NULL_HANDLE; cmdPool_ = VK_NULL_HANDLE;
     allocator_ = nullptr;
+    timelineValue_ = 0;
     available_ = false;
     ownsHandles_ = true;
 }
@@ -322,12 +331,66 @@ VkCommandBuffer VulkanContext::allocCmdBuffer() {
     vkBeginCommandBuffer(cb, &bi); return cb;
 }
 
+void VulkanContext::tryCreateTimelineSemaphore() {
+    if (timelineSem_ != VK_NULL_HANDLE) return;
+    VkSemaphoreTypeCreateInfo stci = {};
+    stci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+    stci.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    stci.initialValue = 0;
+    VkSemaphoreCreateInfo sci = {};
+    sci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    sci.pNext = &stci;
+    VkSemaphore sem = VK_NULL_HANDLE;
+    if (vkCreateSemaphore(device_, &sci, nullptr, &sem) == VK_SUCCESS) {
+        timelineSem_ = sem;
+        timelineValue_ = 0;
+        fprintf(stderr, "[libpfsf] Timeline semaphore enabled for async submits.\n");
+    } else {
+        // Device did not grant timelineSemaphore feature; stay on vkQueueWaitIdle.
+        timelineSem_ = VK_NULL_HANDLE;
+    }
+}
+
 VkResult VulkanContext::submitAndWait(VkCommandBuffer cb) {
     vkEndCommandBuffer(cb);
-    VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO}; si.commandBufferCount = 1; si.pCommandBuffers = &cb;
-    vkQueueSubmit(computeQueue_, 1, &si, VK_NULL_HANDLE);
-    VkResult res = vkQueueWaitIdle(computeQueue_);
-    vkFreeCommandBuffers(device_, cmdPool_, 1, &cb); return res;
+
+    VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cb;
+
+    VkResult res;
+    if (timelineSem_ != VK_NULL_HANDLE) {
+        // Timeline path: wait only on THIS submit, not the entire queue.
+        uint64_t signalValue = ++timelineValue_;
+        VkTimelineSemaphoreSubmitInfo tssi = {};
+        tssi.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        tssi.signalSemaphoreValueCount = 1;
+        tssi.pSignalSemaphoreValues = &signalValue;
+
+        si.pNext = &tssi;
+        si.signalSemaphoreCount = 1;
+        si.pSignalSemaphores = &timelineSem_;
+
+        if (vkQueueSubmit(computeQueue_, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS) {
+            vkFreeCommandBuffers(device_, cmdPool_, 1, &cb);
+            return VK_ERROR_DEVICE_LOST;
+        }
+
+        VkSemaphoreWaitInfo wi = {};
+        wi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+        wi.semaphoreCount = 1;
+        wi.pSemaphores = &timelineSem_;
+        wi.pValues = &signalValue;
+        // 5-second timeout is generous for a compute dispatch; treat
+        // timeout as DEVICE_LOST so callers can reset rather than hang.
+        res = vkWaitSemaphores(device_, &wi, 5'000'000'000ULL);
+    } else {
+        vkQueueSubmit(computeQueue_, 1, &si, VK_NULL_HANDLE);
+        res = vkQueueWaitIdle(computeQueue_);
+    }
+
+    vkFreeCommandBuffers(device_, cmdPool_, 1, &cb);
+    return res;
 }
 
 VkShaderModule VulkanContext::createShaderModule(const uint32_t* p, size_t s) {

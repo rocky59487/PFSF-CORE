@@ -82,6 +82,14 @@ private:
     /// True when this context created the instance/device and should
     /// destroy them on shutdown. False when adopted via initFromExisting.
     bool             ownsHandles_    = true;
+
+    /// Timeline semaphore used to serialise submits without stalling
+    /// unrelated work queued on the same VkQueue. VK_NULL_HANDLE when
+    /// unavailable; submitAndWait falls back to vkQueueWaitIdle.
+    VkSemaphore      timelineSem_    = VK_NULL_HANDLE;
+    uint64_t         timelineValue_  = 0;
+
+    void tryCreateTimelineSemaphore();
 };
 
 } // namespace pfsf
