@@ -27,11 +27,21 @@ public final class NativePFSFRuntime {
     private static final Logger LOGGER = LoggerFactory.getLogger("PFSF-NativeRT");
 
     public static final String ACTIVATION_PROPERTY = "blockreality.native.pfsf";
+    public static final String DISABLE_PROPERTY    = "blockreality.native.pfsf.disable";
 
     private static final boolean KERNELS_PORTED = true;
 
-    private static final boolean       FLAG_ENABLED   = Boolean.getBoolean(ACTIVATION_PROPERTY);
+    // Default-on: users should not need to set a JVM flag for physics to work.
+    // Explicit -Dblockreality.native.pfsf=false or -Dblockreality.native.pfsf.disable=true still disables.
+    private static final boolean FLAG_ENABLED = resolveFlagEnabled();
     private static final AtomicBoolean INIT_ATTEMPTED = new AtomicBoolean(false);
+
+    private static boolean resolveFlagEnabled() {
+        if (Boolean.getBoolean(DISABLE_PROPERTY)) return false;
+        String explicit = System.getProperty(ACTIVATION_PROPERTY);
+        if (explicit != null) return Boolean.parseBoolean(explicit);
+        return true;
+    }
 
     private static volatile long    handle = 0L;
     private static volatile boolean active = false;
@@ -86,13 +96,15 @@ public final class NativePFSFRuntime {
         if (!INIT_ATTEMPTED.compareAndSet(false, true)) return;
 
         if (!FLAG_ENABLED) {
-            LOGGER.debug("Native PFSF runtime disabled: -D{} is not set.", ACTIVATION_PROPERTY);
+            LOGGER.info("Native PFSF runtime disabled via -D{}=false or -D{}=true.",
+                    ACTIVATION_PROPERTY, DISABLE_PROPERTY);
             return;
         }
         if (!NativePFSFBridge.isAvailable()) {
-            LOGGER.warn("Native PFSF runtime requested (-D{}=true) but libblockreality_pfsf was not loaded.", ACTIVATION_PROPERTY);
+            LOGGER.warn("Native PFSF runtime enabled but libblockreality_pfsf was not loaded; physics will not run.");
             return;
         }
+        LOGGER.info("Native PFSF runtime enabling (KERNELS_PORTED={})", KERNELS_PORTED);
 
         // ── 核心修復：手動註冊 Shader ──
         // 這是因為 L1-native 不再包含嵌入的 Shader，我們必須從 Java 端資源手動注入。
