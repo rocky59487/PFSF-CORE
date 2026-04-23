@@ -55,12 +55,25 @@ public final class ThreeTierOrchestrator {
             Set<BlockPos> voxels
     ) {}
 
+    /**
+     * External receiver for orphan events produced each tick. In
+     * production this is wired to {@code CollapseManager.enqueueCollapse};
+     * in unit tests it is a plain List-collecting lambda.
+     */
+    public interface OrphanSink {
+        void onOrphan(OrphanEvent event);
+    }
+
     private final TopologicalSVDAG svdag;
     private final PersistentIslandTracker tracker;
     /** Mirror of every live voxel for fast component extraction. */
     private final Map<BlockPos, Byte> liveVoxels = new HashMap<>();
     /** Subset of {@link #liveVoxels} whose type is {@code TYPE_ANCHOR}. */
     private final Set<BlockPos> anchors = new HashSet<>();
+    private OrphanSink orphanSink;
+    private IslandIdentityJournal journal;
+    /** Cached identities from the previous tick, keyed by fingerprint. */
+    private Map<Long, PersistentIslandTracker.IslandIdentity> prevTickLive = new HashMap<>();
 
     public ThreeTierOrchestrator() {
         this.svdag   = new TopologicalSVDAG();
@@ -69,6 +82,9 @@ public final class ThreeTierOrchestrator {
 
     public TopologicalSVDAG getSvdag() { return svdag; }
     public PersistentIslandTracker getTracker() { return tracker; }
+    public void setOrphanSink(OrphanSink sink) { this.orphanSink = sink; }
+    public void setIdentityJournal(IslandIdentityJournal journal) { this.journal = journal; }
+    public IslandIdentityJournal getIdentityJournal() { return journal; }
 
     /**
      * Apply a voxel change. Feeds both the SVDAG (for Tier-1 dirty
@@ -127,12 +143,38 @@ public final class ThreeTierOrchestrator {
 
         // Produce orphan events in the same component order Tier 3 returned them.
         List<OrphanEvent> orphans = new ArrayList<>();
+        Map<Long, PersistentIslandTracker.IslandIdentity> newLive = new HashMap<>();
         for (int i = 0; i < partition.components().size(); i++) {
             LabelPropagation.Component c = partition.components().get(i);
+            PersistentIslandTracker.IslandIdentity id = ids.get(i);
+            newLive.put(id.fingerprint(), id);
+
+            // Journal births for identities we have never seen before.
+            if (journal != null && !prevTickLive.containsKey(id.fingerprint())
+                    && id.birthTick() == tracker.currentTick()) {
+                journal.recordBirth(tracker.currentTick(), id, c.members().size());
+            }
+
             if (!c.anchored()) {
-                orphans.add(new OrphanEvent(ids.get(i), Set.copyOf(c.members())));
+                OrphanEvent event = new OrphanEvent(id, Set.copyOf(c.members()));
+                orphans.add(event);
+                if (journal != null) journal.recordOrphan(tracker.currentTick(), id, event.voxels());
+                if (orphanSink != null) {
+                    try { orphanSink.onOrphan(event); } catch (Throwable t) { /* swallow to protect loop */ }
+                }
             }
         }
+
+        // Journal deaths: identities that were alive last tick but not this tick.
+        if (journal != null) {
+            for (PersistentIslandTracker.IslandIdentity died : prevTickLive.values()) {
+                if (!newLive.containsKey(died.fingerprint())
+                        && tracker.getIdentity(died.fingerprint()) == null) {
+                    journal.recordDeath(tracker.currentTick(), died, died.birthBlockCount());
+                }
+            }
+        }
+        prevTickLive = newLive;
 
         return new TickResult(orphans, tracker.liveCount(), tracker.currentTick());
     }
