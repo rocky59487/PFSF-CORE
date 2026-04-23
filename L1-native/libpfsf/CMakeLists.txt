@@ -133,9 +133,20 @@ if(PFSF_BUILD_JNI AND JNI_FOUND)
 endif()
 
 # --- HARDWARE PROOF ---
-add_executable(pfsf_hardware_proof ../../research/gpu_hardproof.cpp)
-target_include_directories(pfsf_hardware_proof PRIVATE src include C:/Users/wmc02/Desktop/pr_review/pfsf_core/L1-native/build/_deps/vma-src/include)
-target_link_libraries(pfsf_hardware_proof PRIVATE pfsf_static pfsf_compute br_core Vulkan::Vulkan)
+# Research-only executable. Disabled by default because the source file
+# lives under research/ and is not part of shipping builds; was also the
+# only target pulling in a developer-absolute VMA path.
+option(PFSF_BUILD_HARDWARE_PROOF "Build the research-only hardware-proof executable" OFF)
+if(PFSF_BUILD_HARDWARE_PROOF)
+    add_executable(pfsf_hardware_proof ../../research/gpu_hardproof.cpp)
+    # Resolve VMA headers through the FetchContent_Declare target populated
+    # earlier (vma is MakeAvailable'd near the top of this file); this
+    # removes the hardcoded C:/Users/... include path that broke every
+    # non-dev-machine build.
+    target_include_directories(pfsf_hardware_proof PRIVATE src include)
+    target_link_libraries(pfsf_hardware_proof PRIVATE
+        pfsf_static pfsf_compute br_core Vulkan::Vulkan VulkanMemoryAllocator)
+endif()
 
 # ── Standalone CLI example ──
 if(PFSF_BUILD_EXAMPLE)

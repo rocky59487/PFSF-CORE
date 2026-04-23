@@ -370,11 +370,26 @@ void VulkanContext::unmapBuffer(VkBuffer b) {
 
 VkCommandBuffer VulkanContext::allocCmdBuffer() {
     VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-    ai.commandPool = cmdPool_; ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ai.commandBufferCount = 1;
-    VkCommandBuffer cb; vkAllocateCommandBuffers(device_, &ai, &cb);
+    ai.commandPool = cmdPool_;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+
+    VkCommandBuffer cb = VK_NULL_HANDLE;
+    VkResult ar = vkAllocateCommandBuffers(device_, &ai, &cb);
+    if (ar != VK_SUCCESS || cb == VK_NULL_HANDLE) {
+        fprintf(stderr, "[libpfsf] allocCmdBuffer: vkAllocateCommandBuffers failed (%d)\n", (int)ar);
+        return VK_NULL_HANDLE;
+    }
+
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(cb, &bi); return cb;
+    VkResult br = vkBeginCommandBuffer(cb, &bi);
+    if (br != VK_SUCCESS) {
+        fprintf(stderr, "[libpfsf] allocCmdBuffer: vkBeginCommandBuffer failed (%d)\n", (int)br);
+        vkFreeCommandBuffers(device_, cmdPool_, 1, &cb);
+        return VK_NULL_HANDLE;
+    }
+    return cb;
 }
 
 void VulkanContext::tryCreateTimelineSemaphore() {
@@ -406,7 +421,15 @@ void VulkanContext::tryCreateTimelineSemaphore() {
 }
 
 VkResult VulkanContext::submitAndWait(VkCommandBuffer cb) {
-    vkEndCommandBuffer(cb);
+    // allocCmdBuffer returns VK_NULL_HANDLE on failure; refuse to submit
+    // a null handle rather than hand Vulkan an invalid cmdbuf.
+    if (cb == VK_NULL_HANDLE) return VK_ERROR_INITIALIZATION_FAILED;
+
+    VkResult endR = vkEndCommandBuffer(cb);
+    if (endR != VK_SUCCESS) {
+        vkFreeCommandBuffers(device_, cmdPool_, 1, &cb);
+        return endR;
+    }
 
     VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;
