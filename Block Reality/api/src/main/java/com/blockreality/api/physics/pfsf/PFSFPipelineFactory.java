@@ -40,6 +40,12 @@ public final class PFSFPipelineFactory {
     static long amgRestrictPipeline, amgRestrictPipelineLayout, amgRestrictDSLayout;
     static long amgProlongPipeline,  amgProlongPipelineLayout,  amgProlongDSLayout;
 
+    // Label propagation (Phase B.2; feature-flag gated via PFSFIslandBuffer.isLabelPropEnabled)
+    static long labelPropInitPipeline,      labelPropInitPipelineLayout,      labelPropInitDSLayout;
+    static long labelPropIteratePipeline,   labelPropIteratePipelineLayout,   labelPropIterateDSLayout;
+    static long labelPropAllocPipeline,     labelPropAllocPipelineLayout,     labelPropAllocDSLayout;
+    static long labelPropAggregatePipeline, labelPropAggregatePipelineLayout, labelPropAggregateDSLayout;
+
     private PFSFPipelineFactory() {}
 
     /**
@@ -148,6 +154,32 @@ public final class PFSFPipelineFactory {
             amgProlongPipelineLayout = VulkanComputeContext.createPipelineLayout(amgProlongDSLayout, 8);
             amgProlongPipeline = compilePipeline("pfsf/amg_gather_prolong.comp.glsl", "amg_gather_prolong.comp", amgProlongPipelineLayout);
 
+            // Label propagation — only when feature flag is on. Keeps the
+            // default build path bit-identical to the pre-Phase-B.2 release.
+            if (PFSFIslandBuffer.isLabelPropEnabled()) {
+                // Init: bindings [vtype, islandId]; push Lx,Ly,Lz (12B)
+                labelPropInitDSLayout = VulkanComputeContext.createDescriptorSetLayout(2);
+                labelPropInitPipelineLayout = VulkanComputeContext.createPipelineLayout(labelPropInitDSLayout, 12);
+                labelPropInitPipeline = compilePipeline("pfsf/label_prop_init.comp.glsl", "label_prop_init.comp", labelPropInitPipelineLayout);
+
+                // Iterate: bindings [vtype, islandId]; push Lx,Ly,Lz,pass (16B)
+                labelPropIterateDSLayout = VulkanComputeContext.createDescriptorSetLayout(2);
+                labelPropIteratePipelineLayout = VulkanComputeContext.createPipelineLayout(labelPropIterateDSLayout, 16);
+                labelPropIteratePipeline = compilePipeline("pfsf/label_prop_iterate.comp.glsl", "label_prop_iterate.comp", labelPropIteratePipelineLayout);
+
+                // Summarise alloc: bindings [islandId, numComp, rootToSlot, components]; push Lx,Ly,Lz,maxComponents (16B)
+                labelPropAllocDSLayout = VulkanComputeContext.createDescriptorSetLayout(4);
+                labelPropAllocPipelineLayout = VulkanComputeContext.createPipelineLayout(labelPropAllocDSLayout, 16);
+                labelPropAllocPipeline = compilePipeline("pfsf/label_prop_summarise_alloc.comp.glsl", "label_prop_summarise_alloc.comp", labelPropAllocPipelineLayout);
+
+                // Summarise aggregate: bindings [vtype, islandId, rootToSlot, components]; push Lx,Ly,Lz,maxComponents (16B)
+                labelPropAggregateDSLayout = VulkanComputeContext.createDescriptorSetLayout(4);
+                labelPropAggregatePipelineLayout = VulkanComputeContext.createPipelineLayout(labelPropAggregateDSLayout, 16);
+                labelPropAggregatePipeline = compilePipeline("pfsf/label_prop_summarise_aggregate.comp.glsl", "label_prop_summarise_aggregate.comp", labelPropAggregatePipelineLayout);
+
+                LOGGER.info("[PFSF] Label-propagation pipelines compiled (GPU connectivity enabled)");
+            }
+
             PFSFAsyncCompute.init();
 
             LOGGER.info("[PFSF] All compute pipelines created (v0.2a: +RBGS, +PhaseField Ambati2015, +PCG hybrid, +WSS-HQR vector, +AMG GPU)");
@@ -204,19 +236,22 @@ public final class PFSFPipelineFactory {
             jacobiPipeline, rbgsPipeline, restrictPipeline, prolongPipeline,
             failurePipeline, scatterPipeline, compactPipeline, reduceMaxPipeline, phaseFieldPipeline,
             pcgMatvecPipeline, pcgUpdatePipeline, pcgDirectionPipeline, pcgDotPipeline, pcgPrecomputePipeline,
-            vectorSolvePipeline, amgRestrictPipeline, amgProlongPipeline
+            vectorSolvePipeline, amgRestrictPipeline, amgProlongPipeline,
+            labelPropInitPipeline, labelPropIteratePipeline, labelPropAllocPipeline, labelPropAggregatePipeline
         };
         long[] pipelineLayouts = {
             jacobiPipelineLayout, rbgsPipelineLayout, restrictPipelineLayout, prolongPipelineLayout,
             failurePipelineLayout, scatterPipelineLayout, compactPipelineLayout, reduceMaxPipelineLayout, phaseFieldPipelineLayout,
             pcgMatvecPipelineLayout, pcgUpdatePipelineLayout, pcgDirectionPipelineLayout, pcgDotPipelineLayout, pcgPrecomputePipelineLayout,
-            vectorSolvePipelineLayout, amgRestrictPipelineLayout, amgProlongPipelineLayout
+            vectorSolvePipelineLayout, amgRestrictPipelineLayout, amgProlongPipelineLayout,
+            labelPropInitPipelineLayout, labelPropIteratePipelineLayout, labelPropAllocPipelineLayout, labelPropAggregatePipelineLayout
         };
         long[] dsLayouts = {
             jacobiDSLayout, rbgsDSLayout, restrictDSLayout, prolongDSLayout,
             failureDSLayout, scatterDSLayout, compactDSLayout, reduceMaxDSLayout, phaseFieldDSLayout,
             pcgMatvecDSLayout, pcgUpdateDSLayout, pcgDirectionDSLayout, pcgDotDSLayout, pcgPrecomputeDSLayout,
-            vectorSolveDSLayout, amgRestrictDSLayout, amgProlongDSLayout
+            vectorSolveDSLayout, amgRestrictDSLayout, amgProlongDSLayout,
+            labelPropInitDSLayout, labelPropIterateDSLayout, labelPropAllocDSLayout, labelPropAggregateDSLayout
         };
 
         for (long h : pipelines)       { if (h != 0) org.lwjgl.vulkan.VK10.vkDestroyPipeline(device, h, null); }
@@ -236,6 +271,9 @@ public final class PFSFPipelineFactory {
         vectorSolvePipeline = amgRestrictPipeline = amgProlongPipeline = 0;
         vectorSolvePipelineLayout = amgRestrictPipelineLayout = amgProlongPipelineLayout = 0;
         vectorSolveDSLayout = amgRestrictDSLayout = amgProlongDSLayout = 0;
+        labelPropInitPipeline = labelPropIteratePipeline = labelPropAllocPipeline = labelPropAggregatePipeline = 0;
+        labelPropInitPipelineLayout = labelPropIteratePipelineLayout = labelPropAllocPipelineLayout = labelPropAggregatePipelineLayout = 0;
+        labelPropInitDSLayout = labelPropIterateDSLayout = labelPropAllocDSLayout = labelPropAggregateDSLayout = 0;
 
         LOGGER.info("[PFSF] All compute pipelines destroyed");
     }

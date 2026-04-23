@@ -229,6 +229,13 @@ public final class PFSFEngineInstance implements IPFSFRuntime {
                 }
                 VulkanComputeContext.computeBarrier(frame.cmdBuf);
                 dispatcher.recordFailureDetection(frame, buf, descriptorPool);
+                // Label-propagation runs AFTER failure detection: it does not
+                // depend on failure output directly but must share the same
+                // submission so CPU receives orphan-island metadata on the
+                // same fence as the failure list. Self-guarded by the
+                // isLabelPropEnabled() flag and isLabelPropAllocated() state.
+                VulkanComputeContext.computeBarrier(frame.cmdBuf);
+                dispatcher.recordLabelPropagation(frame, buf, descriptorPool);
             }
             return true;
         } catch (Exception e) {

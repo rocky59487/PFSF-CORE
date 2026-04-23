@@ -3,39 +3,58 @@ package com.blockreality.api.physics.validation;
 import com.blockreality.api.physics.pfsf.*;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 
 /**
- * 論文性能對比核心：CPU vs GPU 吞吐量與延時分析。
- * 產出數據至 research/paper_data/raw/performance_metrics.csv
+ * Bandwidth-model prediction of GPU throughput versus measured CPU Jacobi.
+ *
+ * <p><b>Honest scope:</b> this test does NOT dispatch any GPU work. The CPU
+ * rows are wall-clock measurements (JVM {@link System#nanoTime()}); the
+ * GPU rows are model predictions computed from a nominal DRAM bandwidth
+ * and the 26-connected stencil access pattern. See {@link #predictGpuMs}.
+ *
+ * <p>Output: {@code research/paper_data/raw/performance_metrics_predicted.csv}
+ * with columns {@code Size_N,Role,TimePerStep_ms,Provenance} — every row is
+ * explicitly labelled so downstream readers cannot confuse predicted GPU
+ * numbers with real measurements.
  */
 public class PerformanceBenchmarkTest {
 
-    private static final String PERF_DATA_PATH = "../../research/paper_data/raw/performance_metrics.csv";
+    private static final String PERF_DATA_PATH =
+            "../../research/paper_data/raw/performance_metrics_predicted.csv";
+
+    /** Nominal GPU DRAM bandwidth used in the prediction model (GB/s). */
+    private static final double GPU_BANDWIDTH_GB_S = 400.0;
+    /** Optimisation factor applied to the raw bandwidth bound (0.3 = 70% reuse). */
+    private static final double GPU_OPT_FACTOR = 0.3;
+    /** Assumed fixed dispatch overhead per step (ms). */
+    private static final double GPU_DISPATCH_OVERHEAD_MS = 0.05;
 
     @Test
-    @DisplayName("產出論文性能對比數據")
+    @DisplayName("CPU measured vs GPU predicted (bandwidth model)")
     public void runPerformanceComparison() throws IOException {
-        Files.writeString(Paths.get(PERF_DATA_PATH), "Size_N,CPUTime_ms,GPUTime_ms,Speedup\n", 
+        Files.writeString(Paths.get(PERF_DATA_PATH),
+                "Size_N,Role,TimePerStep_ms,Provenance\n",
                 StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
 
-        // 測試不同規模的體素島嶼 (N = 10^3 到 10^6)
-        int[] sizes = {16, 32, 64, 128}; 
-        
+        // Voxel island sizes L ∈ {16, 32, 64, 128} ⇒ N ∈ {~4k, ~33k, ~262k, ~2M}
+        int[] sizes = {16, 32, 64, 128};
         for (int L : sizes) {
             benchmarkSize(L);
         }
     }
 
     private void benchmarkSize(int L) throws IOException {
-        VoxelPhysicsCpuReference.Domain dom = VoxelPhysicsCpuReference.buildCantilever(L, L/4, 1.0);
+        VoxelPhysicsCpuReference.Domain dom =
+                VoxelPhysicsCpuReference.buildCantilever(L, L / 4, 1.0);
         int N = dom.N();
         int iterations = 100;
 
-        // 1. CPU 耗時測試 (Nano precision)
+        // 1. CPU measured
         float[] phiCpu = new float[N];
         long startCpu = System.nanoTime();
         for (int i = 0; i < iterations; i++) {
@@ -44,20 +63,33 @@ public class PerformanceBenchmarkTest {
         long endCpu = System.nanoTime();
         double cpuMs = (endCpu - startCpu) / 1_000_000.0 / iterations;
 
-        // 2. GPU 耗時預測 (基於 Vulkan Pipeline Overhead + Memory Bandwidth 估算)
-        // 注意：在無實體 GPU 環境中，我們基於已知的 70% 頻寬節省與 Stencil 運算量進行物理建模
-        double memoryBandwidthGBs = 400.0; // 模擬主流 GPU 頻寬
-        double bytesAccessed = (double)N * 26 * 4 * 2; // 每個 voxel 26 鄰居讀寫
-        double gpuTheoreticalMs = (bytesAccessed / (memoryBandwidthGBs * 1e6));
-        
-        // 加入已實現的「逆對角線優化」因子 (0.3x 原本開銷)
-        double gpuOptimizedMs = gpuTheoreticalMs * 0.3 + 0.05; // 加上核心啟動延遲
-        
-        double speedup = cpuMs / gpuOptimizedMs;
+        // 2. GPU predicted (bandwidth model, no GPU dispatch occurs)
+        double gpuPredictedMs = predictGpuMs(N);
 
-        String result = String.format("%d,%.4f,%.4f,%.2fx\n", N, cpuMs, gpuOptimizedMs, speedup);
-        Files.writeString(Paths.get(PERF_DATA_PATH), result, StandardOpenOption.APPEND);
-        
-        System.out.println(">>> [Perf] N=" + N + " | CPU: " + String.format("%.3f", cpuMs) + "ms | GPU(Pred): " + String.format("%.3f", gpuOptimizedMs) + "ms | Speedup: " + String.format("%.1f", speedup) + "x");
+        writeRow(N, "CPU_JAVA", cpuMs, "MEASURED_JVM_NANOTIME");
+        writeRow(N, "GPU_FNO", gpuPredictedMs,
+                "PREDICTED_BANDWIDTH_MODEL(bw=" + GPU_BANDWIDTH_GB_S + "GB/s,opt=" + GPU_OPT_FACTOR + ")");
+
+        System.out.printf(">>> [Perf] N=%d  CPU=%.3fms(measured)  GPU=%.3fms(predicted)%n",
+                N, cpuMs, gpuPredictedMs);
+    }
+
+    /**
+     * Roofline-style upper bound for a single Jacobi step under the
+     * 26-connected stencil:
+     *   bytes_per_voxel = 26 neighbours × 4 bytes × 2 (read φ, write new φ)
+     *   t_bw_ms = bytes_total / bandwidth
+     *   t_gpu_ms = t_bw_ms × GPU_OPT_FACTOR + dispatch_overhead
+     * This is NOT a measured runtime.
+     */
+    private static double predictGpuMs(int N) {
+        double bytesAccessed = (double) N * 26 * 4 * 2;
+        double bwMs = bytesAccessed / (GPU_BANDWIDTH_GB_S * 1e6);
+        return bwMs * GPU_OPT_FACTOR + GPU_DISPATCH_OVERHEAD_MS;
+    }
+
+    private static void writeRow(int N, String role, double ms, String provenance) throws IOException {
+        String row = String.format("%d,%s,%.4f,%s%n", N, role, ms, provenance);
+        Files.writeString(Paths.get(PERF_DATA_PATH), row, StandardOpenOption.APPEND);
     }
 }

@@ -64,14 +64,95 @@ public class CollapseManager {
     // 連鎖崩塌最大深度 — 由 BRConfig.getCollapseCascadeMaxDepth() 動態讀取
     // 佇列大小上限 — 由 BRConfig.getCollapseQueueMaxSize() 動態讀取
 
-    /**
-     * 崩塌日誌 — 記錄因果鏈，支援 /br journal 查詢與 /br undo 回滾。
+    /** 崩塌日誌 — 記錄因果鏈，支援 /br journal 查詢與 /br undo 回滾。
      * 全域單例：所有維度共享同一日誌（chainId 全域唯一）。
      */
     private static final CollapseJournal JOURNAL = new CollapseJournal();
 
     /** 取得崩塌日誌（供指令層查詢）。 */
     public static CollapseJournal getJournal() { return JOURNAL; }
+
+    // ═════════════════════════════════════════════════════════════
+    //  Orphan-island bridge  (Phase A correctness fix completion)
+    // ═════════════════════════════════════════════════════════════
+    //
+    // StructureIslandRegistry fires an OrphanIslandEvent the instant a
+    // split leaves a fragment with no anchor. Registering this static
+    // listener at class init ensures the fragment is enqueued for
+    // collapse in the SAME tick as the fracture, not the 3–10 tick
+    // delay that PFSF's phi-divergence detection would otherwise take
+    // (the user-reported "floating blocks" bug).
+    //
+    // The listener is a plain static initialiser so it runs on first
+    // CollapseManager class-load; the registry itself performs the
+    // Set<BlockPos> fragment computation, so the listener only has to
+    // translate and dispatch.
+    static {
+        StructureIslandRegistry.setOrphanListener(CollapseManager::onOrphanIsland);
+    }
+
+    /**
+     * Receives orphan-island notifications from {@link StructureIslandRegistry}.
+     *
+     * <p>Enqueues every fragment block as a {@link FailureType#NO_SUPPORT}
+     * collapse so the existing batch pipeline ({@code processQueue},
+     * overflow buffer, particle effects) handles the actual destruction.
+     *
+     * <p>When {@link StructureIslandRegistry.OrphanIslandEvent#level()}
+     * is null — today's {@code flushDestructions} path — the event is
+     * appended to {@link OrphanReplayBuffer} instead of being dropped.
+     * {@link #flushPendingOrphans(ServerLevel)} replays the buffer on
+     * the next server tick against a known level so batched orphan
+     * fragments still collapse, at most one tick late.
+     */
+    public static void onOrphanIsland(StructureIslandRegistry.OrphanIslandEvent event) {
+        if (event.members().isEmpty()) return;
+        ServerLevel level = event.level();
+        if (level == null) {
+            OrphanReplayBuffer.add(event.islandId(), event.members());
+            LOGGER.debug("[Collapse] Buffered orphan island {} ({} blocks) for next-tick replay (no ServerLevel)",
+                    event.islandId(), event.members().size());
+            return;
+        }
+        LOGGER.info("[Collapse] Orphan island {} ({} blocks) from tick-local fracture; enqueueing NO_SUPPORT collapse",
+                event.islandId(), event.members().size());
+        enqueueCollapse(level, event.members(), FailureType.NO_SUPPORT);
+    }
+
+    /**
+     * Replay every orphan event buffered by {@link #onOrphanIsland}
+     * against the supplied {@link ServerLevel}. {@code ServerTickHandler}
+     * calls this once per tick per loaded dimension; the first call
+     * to receive a non-empty buffer drains it.
+     *
+     * <p>Buffered events do not carry dimension information (the
+     * originating {@code flushDestructions} call-site has no level),
+     * so the first dimension to reach this method each tick takes
+     * them. Multi-world callers should prefer the synchronous
+     * {@link StructureIslandRegistry#unregisterBlock} path, which
+     * preserves the originating level end-to-end.
+     *
+     * @return the number of orphan events replayed this call.
+     */
+    public static int flushPendingOrphans(ServerLevel level) {
+        if (level == null) return 0;
+        java.util.List<OrphanReplayBuffer.PendingOrphan> drained = OrphanReplayBuffer.drain();
+        int count = 0;
+        for (OrphanReplayBuffer.PendingOrphan o : drained) {
+            if (o.members().isEmpty()) continue;
+            enqueueCollapse(level, o.members(), FailureType.NO_SUPPORT);
+            count++;
+        }
+        if (count > 0) {
+            LOGGER.info("[Collapse] Replayed {} buffered orphan island(s) on tick-flush", count);
+        }
+        return count;
+    }
+
+    /** Size of the pending replay buffer. Primarily for monitoring. */
+    public static int getPendingOrphanCount() {
+        return OrphanReplayBuffer.size();
+    }
 
     /**
      * 坍方佇列 — 超過每 tick 上限的方塊排入此佇列。

@@ -238,4 +238,19 @@ public final class PFSFDispatcher {
         PFSFFailureRecorder.recordFailureCompact(frame.cmdBuf, buf, frame, descriptorPool);
         PFSFFailureRecorder.recordPhiMaxReduction(frame.cmdBuf, buf, frame);
     }
+
+    /**
+     * Record the GPU Shiloach–Vishkin label-propagation pipeline
+     * (init → iterate×N → summarise_alloc → summarise_aggregate →
+     * stage-to-host readback). Called after failure detection inside
+     * the same submission. Safe no-op when the feature flag is off
+     * or the island's label-prop buffers were not allocated.
+     */
+    public void recordLabelPropagation(PFSFAsyncCompute.ComputeFrame frame,
+                                       PFSFIslandBuffer buf,
+                                       long descriptorPool) {
+        if (!PFSFIslandBuffer.isLabelPropEnabled()) return;
+        if (!buf.isLabelPropAllocated()) return;
+        PFSFLabelPropRecorder.recordLabelProp(frame.cmdBuf, buf, descriptorPool);
+    }
 }

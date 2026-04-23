@@ -1,1 +1,6 @@
-Size_N,CPU_R9_ms,GPU_5070TI_ms,RealSpeedup
+Size_N,Role,TimePerStep_ms,Provenance
+# Regenerate this file on a machine with a working native runtime:
+#   ./gradlew :api:test --tests "com.blockreality.api.physics.validation.RealHardwareBenchmarkTest"
+# When the native runtime is unavailable the test is SKIPPED (not passed)
+# via JUnit Assumptions.assumeTrue, so this file will be empty until a
+# real hardware measurement is recorded.

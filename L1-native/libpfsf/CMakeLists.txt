@@ -116,6 +116,15 @@ if(PFSF_BUILD_JNI AND JNI_FOUND)
     target_link_libraries(blockreality_pfsf PRIVATE pfsf JNI::JNI)
     target_include_directories(blockreality_pfsf PRIVATE ${JNI_INCLUDE_DIRS})
     target_link_libraries(blockreality_pfsf PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,pfsf_compute>)
+    # Force-link the SPIR-V registry so its static initialisers (which
+    # register each compute kernel into br_core::SpirvRegistry at library
+    # load time) are NOT dead-stripped. Without WHOLE_ARCHIVE, modern
+    # linkers drop the translation units whose symbols aren't directly
+    # referenced, and build_compute_pipeline() reports
+    # "SPIR-V blob missing" at first dispatch.
+    if(TARGET br_shaders)
+        target_link_libraries(blockreality_pfsf PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,br_shaders>)
+    endif()
     if(NOT WIN32)
         set_target_properties(blockreality_pfsf PROPERTIES PREFIX "lib")
     endif()

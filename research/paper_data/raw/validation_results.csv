@@ -1,4 +1,7 @@
-Geometry,ErrorPercentage
-CANTILEVER,24.3097
-ARCH,1.2500
-SLAB,1.2500
+Geometry,L2RelErrorPercent,Provenance
+# Regenerate this file with:
+#   ./gradlew :api:test --tests "com.blockreality.api.physics.validation.PaperDataCollectorTest"
+# The prior rows (CANTILEVER 24.3097, ARCH 1.2500 placeholder, SLAB 1.2500
+# placeholder) were produced under an older test harness whose ARCH and SLAB
+# values were hard-coded literals. The new harness compares against
+# closed-form analytic solutions for all three scenarios.
