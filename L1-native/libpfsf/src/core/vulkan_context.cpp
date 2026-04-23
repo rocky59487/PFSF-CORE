@@ -43,8 +43,28 @@ bool VulkanContext::init() {
 
     if (!force_load_vulkan()) return false;
 
-    // ── Instance: try 1.3 → 1.2 → 1.1, enable properties2 extension when needed
-    const char* kInstanceExts[] = { "VK_KHR_get_physical_device_properties2" };
+    // ── Instance: try 1.3 → 1.2 → 1.1.
+    // On 1.1 we *try* to enable VK_KHR_get_physical_device_properties2 so
+    // vkGetPhysicalDeviceFeatures2 works as a promoted-from-KHR call, but
+    // only after verifying the driver actually exposes the extension.
+    // VulkanMod (Minecraft's reference Vulkan renderer) simply stays on
+    // 1.1 + vkGetPhysicalDeviceFeatures and skips features2 entirely; we
+    // fall back to that same conservative path when the extension is
+    // missing rather than failing vkCreateInstance.
+    bool have_properties2_ext = false;
+    {
+        uint32_t extCount = 0;
+        vkEnumerateInstanceExtensionProperties(nullptr, &extCount, nullptr);
+        std::vector<VkExtensionProperties> exts(extCount);
+        vkEnumerateInstanceExtensionProperties(nullptr, &extCount, exts.data());
+        for (auto& e : exts) {
+            if (strcmp(e.extensionName, "VK_KHR_get_physical_device_properties2") == 0) {
+                have_properties2_ext = true; break;
+            }
+        }
+    }
+
+    const char* kProperties2Ext = "VK_KHR_get_physical_device_properties2";
     uint32_t versions[] = { VK_API_VERSION_1_3, VK_API_VERSION_1_2, VK_API_VERSION_1_1 };
     VkResult last_res = VK_SUCCESS;
     uint32_t instanceApiVersion = 0;
@@ -58,17 +78,18 @@ bool VulkanContext::init() {
         VkInstanceCreateInfo instCI = {};
         instCI.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
         instCI.pApplicationInfo = &appInfo;
-        if (ver == VK_API_VERSION_1_1) {
-            // Extension only needed on 1.1; 1.2+ has properties2 in core.
+        if (ver == VK_API_VERSION_1_1 && have_properties2_ext) {
+            // Promote features2 access on 1.1 driver. On 1.2+ it's core.
             instCI.enabledExtensionCount = 1;
-            instCI.ppEnabledExtensionNames = kInstanceExts;
+            instCI.ppEnabledExtensionNames = &kProperties2Ext;
         }
 
         last_res = vkCreateInstance(&instCI, nullptr, &instance_);
         if (last_res == VK_SUCCESS) {
             instanceApiVersion = ver;
-            fprintf(stderr, "[libpfsf] Instance created with API %d.%d\n",
-                    VK_VERSION_MAJOR(ver), VK_VERSION_MINOR(ver));
+            fprintf(stderr, "[libpfsf] Instance created with API %d.%d (properties2=%s)\n",
+                    VK_VERSION_MAJOR(ver), VK_VERSION_MINOR(ver),
+                    (ver >= VK_API_VERSION_1_2 || have_properties2_ext) ? "yes" : "no");
             break;
         }
     }
@@ -87,25 +108,38 @@ bool VulkanContext::init() {
     if (qf < 0) return false;
     computeQueueFamily_ = (uint32_t)qf;
 
-    // ── Query available features so we only enable what the driver supports ──
-    VkPhysicalDeviceFeatures2 feats2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
-    VkPhysicalDeviceVulkan12Features feats12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
-    bool canUse12Chain = (instanceApiVersion >= VK_API_VERSION_1_2);
-    if (canUse12Chain) feats2.pNext = &feats12;
-    vkGetPhysicalDeviceFeatures2(physDevice_, &feats2);
+    // features2 is only safe when instance API >= 1.2 OR properties2 ext.
+    // When neither, stay on 1.0-style vkGetPhysicalDeviceFeatures path.
+    const bool features2_available =
+        (instanceApiVersion >= VK_API_VERSION_1_2) || have_properties2_ext;
+    const bool canUse12Chain = (instanceApiVersion >= VK_API_VERSION_1_2);
 
-    // Keep only the features we actually need and the device supports.
+    VkPhysicalDeviceFeatures wanted10{};
     VkPhysicalDeviceFeatures2 wanted2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
-    wanted2.features.shaderInt64   = feats2.features.shaderInt64;
-    wanted2.features.shaderFloat64 = feats2.features.shaderFloat64;
-
     VkPhysicalDeviceVulkan12Features wanted12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
-    if (canUse12Chain) {
-        wanted12.timelineSemaphore        = feats12.timelineSemaphore;
-        wanted12.storageBuffer8BitAccess  = feats12.storageBuffer8BitAccess;
-        wanted12.shaderInt8               = feats12.shaderInt8;
-        wanted2.pNext = &wanted12;
+
+    if (features2_available) {
+        VkPhysicalDeviceFeatures2 feats2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+        VkPhysicalDeviceVulkan12Features feats12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+        if (canUse12Chain) feats2.pNext = &feats12;
+        vkGetPhysicalDeviceFeatures2(physDevice_, &feats2);
+
+        wanted2.features.shaderInt64   = feats2.features.shaderInt64;
+        wanted2.features.shaderFloat64 = feats2.features.shaderFloat64;
+        if (canUse12Chain) {
+            wanted12.timelineSemaphore       = feats12.timelineSemaphore;
+            wanted12.storageBuffer8BitAccess = feats12.storageBuffer8BitAccess;
+            wanted12.shaderInt8              = feats12.shaderInt8;
+            wanted2.pNext = &wanted12;
+        }
+    } else {
+        // 1.1 without properties2 ext: conservative 1.0 feature query.
+        VkPhysicalDeviceFeatures have{};
+        vkGetPhysicalDeviceFeatures(physDevice_, &have);
+        wanted10.shaderInt64   = have.shaderInt64;
+        wanted10.shaderFloat64 = have.shaderFloat64;
     }
+    timelineEnabled_ = (canUse12Chain && wanted12.timelineSemaphore == VK_TRUE);
 
     float qp = 1.0f;
     VkDeviceQueueCreateInfo qCI = {};
@@ -118,7 +152,11 @@ bool VulkanContext::init() {
     devCI.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     devCI.queueCreateInfoCount = 1;
     devCI.pQueueCreateInfos = &qCI;
-    devCI.pNext = &wanted2;  // features2 chain; do not set pEnabledFeatures when using pNext
+    if (features2_available) {
+        devCI.pNext = &wanted2;  // features2 chain — don't set pEnabledFeatures here
+    } else {
+        devCI.pEnabledFeatures = &wanted10;
+    }
 
     if (vkCreateDevice(physDevice_, &devCI, nullptr, &device_) != VK_SUCCESS) {
         fprintf(stderr, "[libpfsf] vkCreateDevice FAILED\n");
@@ -127,9 +165,14 @@ bool VulkanContext::init() {
 
     vkGetDeviceQueue(device_, computeQueueFamily_, 0, &computeQueue_);
 
-    fprintf(stderr, "[libpfsf] Device features enabled: int64=%d float64=%d timelineSem=%d int8=%d storage8bit=%d\n",
-            wanted2.features.shaderInt64, wanted2.features.shaderFloat64,
-            wanted12.timelineSemaphore, wanted12.shaderInt8, wanted12.storageBuffer8BitAccess);
+    if (features2_available) {
+        fprintf(stderr, "[libpfsf] Device features enabled: int64=%d float64=%d timelineSem=%d int8=%d storage8bit=%d\n",
+                wanted2.features.shaderInt64, wanted2.features.shaderFloat64,
+                wanted12.timelineSemaphore, wanted12.shaderInt8, wanted12.storageBuffer8BitAccess);
+    } else {
+        fprintf(stderr, "[libpfsf] Device features enabled (1.0 path): int64=%d float64=%d\n",
+                wanted10.shaderInt64, wanted10.shaderFloat64);
+    }
 
     VkCommandPoolCreateInfo cpCI = {};
     cpCI.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -150,7 +193,9 @@ bool VulkanContext::init() {
         return false;
     }
 
-    tryCreateTimelineSemaphore();
+    if (timelineEnabled_) {
+        tryCreateTimelineSemaphore();
+    }
 
     available_ = true;
     fprintf(stderr, "[libpfsf] Vulkan ready on device: %s\n", deviceName_.c_str());
@@ -223,6 +268,7 @@ void VulkanContext::shutdown() {
     instance_ = VK_NULL_HANDLE; device_ = VK_NULL_HANDLE; cmdPool_ = VK_NULL_HANDLE;
     allocator_ = nullptr;
     timelineValue_ = 0;
+    timelineEnabled_ = false;
     available_ = false;
     ownsHandles_ = true;
 }
@@ -333,6 +379,10 @@ VkCommandBuffer VulkanContext::allocCmdBuffer() {
 
 void VulkanContext::tryCreateTimelineSemaphore() {
     if (timelineSem_ != VK_NULL_HANDLE) return;
+    // In the owned-init path we only call this when timelineEnabled_ was
+    // set true during feature negotiation. In initFromExisting we don't
+    // know whether the Java host enabled the feature; we still attempt
+    // and fall back on VK_ERROR_FEATURE_NOT_PRESENT rather than guessing.
     VkSemaphoreTypeCreateInfo stci = {};
     stci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
     stci.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
@@ -341,13 +391,17 @@ void VulkanContext::tryCreateTimelineSemaphore() {
     sci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
     sci.pNext = &stci;
     VkSemaphore sem = VK_NULL_HANDLE;
-    if (vkCreateSemaphore(device_, &sci, nullptr, &sem) == VK_SUCCESS) {
+    VkResult r = vkCreateSemaphore(device_, &sci, nullptr, &sem);
+    if (r == VK_SUCCESS) {
         timelineSem_ = sem;
         timelineValue_ = 0;
         fprintf(stderr, "[libpfsf] Timeline semaphore enabled for async submits.\n");
     } else {
-        // Device did not grant timelineSemaphore feature; stay on vkQueueWaitIdle.
+        // Feature unavailable (or validation layer complaint) — stay on
+        // vkQueueWaitIdle path in submitAndWait. Not fatal.
         timelineSem_ = VK_NULL_HANDLE;
+        fprintf(stderr, "[libpfsf] Timeline semaphore unavailable (vkResult=%d); using vkQueueWaitIdle fallback.\n",
+                (int)r);
     }
 }
 
