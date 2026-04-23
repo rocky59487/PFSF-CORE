@@ -67,6 +67,21 @@ public class StructureIslandRegistry {
     private static final Set<BlockPos> anchorBlocks = ConcurrentHashMap.newKeySet();
 
     /**
+     * Logged once per JVM when {@link #orphanClassificationEnabled}
+     * first observes an empty anchor set. Codex review on the initial
+     * land of this classifier flagged (P0) that
+     * {@link #registerAnchor} is only ever called from tests, so in
+     * production {@link #anchorBlocks} stays empty and every fractured
+     * component would be treated as orphan. The safety valve below
+     * keeps {@code notifyOrphan} silent until anchor registration is
+     * wired from the natural-anchor flow; the rewrite under
+     * {@code physics/topology/} supersedes this code path entirely but
+     * the valve protects today's production builds in the meantime.
+     */
+    private static final java.util.concurrent.atomic.AtomicBoolean SAFETY_VALVE_LOGGED =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /**
      * Split 後產生、無任何錨點連通的新 island 會透過此 listener 通知。
      * 實務上由 {@code CollapseManager} 安裝，立即整個拆除該 island。
      * 若未安裝（如單元測試情境），不會有任何副作用，僅記錄 WARN log。
@@ -618,7 +633,7 @@ public class StructureIslandRegistry {
             island.recalculateBounds();
             BlockPos only = island.members.iterator().next();
             boolean anchored = isBlockAnchored(only);
-            if (!anchored) {
+            if (!anchored && orphanClassificationEnabled()) {
                 notifyOrphan(islandId, Set.of(only), epoch, level);
             }
             return Collections.singletonList(islandId);
@@ -637,7 +652,7 @@ public class StructureIslandRegistry {
             // just removed), surface it to the orphan listener.
             island.recalculateBounds();
             LabelPropagation.Component sole = partition.components().get(0);
-            if (!sole.anchored()) {
+            if (!sole.anchored() && orphanClassificationEnabled()) {
                 notifyOrphan(islandId, sole.members(), epoch, level);
             }
             return Collections.singletonList(islandId);
@@ -667,7 +682,7 @@ public class StructureIslandRegistry {
 
         List<Integer> resultIds = new java.util.ArrayList<>();
         resultIds.add(islandId);
-        if (!keep.anchored()) {
+        if (!keep.anchored() && orphanClassificationEnabled()) {
             // Even the "kept" component is orphan — tell CollapseManager.
             notifyOrphan(islandId, keep.members(), epoch, level);
         }
@@ -687,7 +702,7 @@ public class StructureIslandRegistry {
             resultIds.add(newId);
             LOGGER.info("[IslandRegistry] Split: new island {} with {} blocks from island {} (anchored={})",
                     newId, c.members().size(), islandId, c.anchored());
-            if (!c.anchored()) {
+            if (!c.anchored() && orphanClassificationEnabled()) {
                 notifyOrphan(newId, c.members(), epoch, level);
             }
         }
@@ -700,6 +715,31 @@ public class StructureIslandRegistry {
      * {@link LabelPropagation#bfsComponents} with
      * {@link LabelPropagation.NeighborPolicy#FACE_6}.
      */
+    /**
+     * Gate that surrounds every {@code notifyOrphan} call in
+     * {@link #checkAndSplitIsland}. When {@link #anchorBlocks} is
+     * empty — the current production state — every component appears
+     * orphan to the classifier and CollapseManager gets flooded with
+     * spurious entries on every block break. Returning false here
+     * silences orphan notification until anchor registration is wired.
+     * Logs the first trigger per JVM so operators can tell the valve
+     * is in effect.
+     */
+    private static boolean orphanClassificationEnabled() {
+        if (!anchorBlocks.isEmpty()) return true;
+        if (SAFETY_VALVE_LOGGED.compareAndSet(false, true)) {
+            LOGGER.warn(
+                "[IslandRegistry] Safety valve active: anchorBlocks is empty; "
+                + "skipping orphan classification on every fracture. Natural-anchor "
+                + "registration is not yet wired to production; the replacement "
+                + "under physics/topology/ThreeTierOrchestrator addresses this "
+                + "properly. Register at least one anchor via registerAnchor(...) "
+                + "to re-enable classification."
+            );
+        }
+        return false;
+    }
+
     private static boolean isBlockAnchored(BlockPos pos) {
         if (anchorBlocks.contains(pos)) return true;
         for (Direction d : Direction.values()) {

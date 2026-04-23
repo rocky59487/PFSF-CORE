@@ -185,4 +185,49 @@ public class IslandSplitAnchorTrackingTest {
                 "Orphan notification must fire synchronously, in the same method call as the fracture — " +
                 "this is the key correctness property against the 'floating blocks for several ticks' bug");
     }
+
+    // ─── (5) safety valve: anchorBlocks empty → no orphan flood ────
+
+    @Test
+    @DisplayName("Safety valve — with zero registered anchors, fracturing an island produces NO orphan events")
+    public void safetyValveSuppressesOrphansWhenAnchorsEmpty() {
+        // Deliberately register ZERO anchors. This reproduces the
+        // production state flagged by the P0 review: anchor
+        // registration is not yet wired to natural-anchor tracking,
+        // so anchorBlocks stays empty. Without the safety valve,
+        // every fractured component would be classified as orphan
+        // and CollapseManager would be flooded on ordinary block
+        // breaks.
+        for (int x = 0; x <= 4; x++) StructureIslandRegistry.registerBlock(new BlockPos(x, 0, 0), 1L);
+
+        // Cut the bar in the middle — would normally create two
+        // orphan fragments (no anchors means no component anchored).
+        StructureIslandRegistry.unregisterBlock(null, new BlockPos(2, 0, 0), 2L);
+
+        assertTrue(received.isEmpty(),
+                "Safety valve must suppress orphan events when anchorBlocks is empty. "
+                + "Got " + received.size() + " events: " + received);
+    }
+
+    @Test
+    @DisplayName("Safety valve disengages the moment a single anchor is registered")
+    public void safetyValveLiftsWhenAnchorRegistered() {
+        // Same shape as above, but we register exactly one anchor
+        // that belongs to the LEFT half. The right half should then
+        // register as orphan when the middle is cut.
+        for (int x = 0; x <= 4; x++) StructureIslandRegistry.registerBlock(new BlockPos(x, 0, 0), 1L);
+        StructureIslandRegistry.registerAnchor(new BlockPos(0, -1, 0));
+
+        StructureIslandRegistry.unregisterBlock(null, new BlockPos(2, 0, 0), 2L);
+
+        assertFalse(received.isEmpty(),
+                "Once anchorBlocks is non-empty, classification must resume and orphans fire");
+        Set<BlockPos> orphanBlocks = new HashSet<>();
+        for (OrphanIslandEvent e : received) orphanBlocks.addAll(e.members());
+        assertTrue(orphanBlocks.contains(new BlockPos(3, 0, 0))
+                        || orphanBlocks.contains(new BlockPos(4, 0, 0)),
+                "Right half should be reported as orphan; received voxels: " + orphanBlocks);
+        assertFalse(orphanBlocks.contains(new BlockPos(0, 0, 0)),
+                "Anchored left half must not appear in any orphan event");
+    }
 }
