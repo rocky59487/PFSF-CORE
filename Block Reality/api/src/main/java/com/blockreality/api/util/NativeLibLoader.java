@@ -162,18 +162,18 @@ public final class NativeLibLoader {
 
     private static Path ensureSharedDir() {
         if (sharedDirResolved) return sharedDir;
-        
-        // ★ 核心修正：繞過 WDAC 封鎖
-        // Windows Device Guard / AppLocker 預設會封鎖 Temp 目錄中未簽章的 DLL。
-        // 將解壓縮目錄改為 C:\Windows\Tasks，這是多數嚴格政策下的 Default-Allow 信任區。
+
+        // On Windows, WDAC / AppLocker commonly block unsigned DLL loads from
+        // %TEMP%. C:\Windows\Tasks is a Default-Allow trust zone under most
+        // strict policies. On Linux/macOS this path is meaningless and would
+        // be interpreted as a relative path, so fall back to java.io.tmpdir.
         synchronized (NativeLibLoader.class) {
             if (sharedDirResolved) return sharedDir;
             Path dir = null;
             try {
                 String triple = LibraryTriple.current();
                 String digest = computeJarDigest();
-                // 覆寫系統 tempdir
-                Path baseTmp  = Paths.get("C:\\Windows\\Tasks");
+                Path baseTmp = chooseBaseDir();
                 dir = baseTmp.resolve("blockreality-native-" + triple + "-" + digest);
                 Files.createDirectories(dir);
             } catch (IOException e) {
@@ -185,6 +185,16 @@ public final class NativeLibLoader {
             sharedDirResolved = true;
             return dir;
         }
+    }
+
+    private static Path chooseBaseDir() {
+        String os = System.getProperty("os.name", "").toLowerCase();
+        if (os.contains("win")) {
+            Path tasks = Paths.get("C:\\Windows\\Tasks");
+            if (Files.isDirectory(tasks)) return tasks;
+        }
+        String tmp = System.getProperty("java.io.tmpdir");
+        return (tmp != null && !tmp.isEmpty()) ? Paths.get(tmp) : Paths.get(".");
     }
 
     /**
