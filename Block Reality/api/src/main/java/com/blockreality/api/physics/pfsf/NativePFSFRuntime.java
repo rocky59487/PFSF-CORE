@@ -40,6 +40,8 @@ public final class NativePFSFRuntime {
 
     private NativePFSFRuntime() {}
 
+    public static long getHandle() { return handle; }
+
     public static boolean isActive()        { return active;      }
     public static boolean isFlagEnabled()   { return FLAG_ENABLED; }
     public static boolean isLibraryLoaded() { return NativePFSFBridge.isAvailable(); }

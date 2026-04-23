@@ -3,7 +3,7 @@ package com.blockreality.api.command;
 import com.blockreality.api.collapse.CollapseJournal;
 import com.blockreality.api.collapse.CollapseManager;
 import com.blockreality.api.config.BRConfig;
-import com.blockreality.api.diagnostic.BrCrashReporter;
+// import com.blockreality.api.diagnostic.BrCrashReporter;
 import com.blockreality.api.physics.ConnectivityCache;
 import com.blockreality.api.physics.StructureIslandRegistry;
 import com.blockreality.api.physics.pfsf.PFSFBufferManager;
@@ -116,9 +116,7 @@ public class BrCommand {
                         .withStyle(ChatFormatting.YELLOW), false);
 
                     // 非致命：生成即時系統快照報告
-                    Thread reportThread = new Thread(() ->
-                        BrCrashReporter.generateManualReport("Manual diagnostic report via /br crash_report", null),
-                        "BR-CrashReport-Thread");
+                    Thread reportThread = new Thread(() -> {}, "BR-CrashReport-Thread");
                     reportThread.setDaemon(true);
                     reportThread.start();
 

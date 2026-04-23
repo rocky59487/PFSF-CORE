@@ -113,9 +113,10 @@ target_compile_definitions(pfsf PRIVATE PFSF_USE_BR_CORE=1)
 # ── JNI bridge ──
 if(PFSF_BUILD_JNI AND JNI_FOUND)
     add_library(blockreality_pfsf SHARED src/jni/native_pfsf_bridge.cpp)
-    target_link_libraries(blockreality_pfsf PRIVATE pfsf JNI::JNI)
+    target_link_libraries(blockreality_pfsf PRIVATE pfsf_static JNI::JNI)
     target_include_directories(blockreality_pfsf PRIVATE ${JNI_INCLUDE_DIRS})
     target_link_libraries(blockreality_pfsf PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,pfsf_compute>)
+    target_compile_definitions(blockreality_pfsf PRIVATE PFSF_USE_BR_CORE=1)
     # Force-link the SPIR-V registry so its static initialisers (which
     # register each compute kernel into br_core::SpirvRegistry at library
     # load time) are NOT dead-stripped. Without WHOLE_ARCHIVE, modern

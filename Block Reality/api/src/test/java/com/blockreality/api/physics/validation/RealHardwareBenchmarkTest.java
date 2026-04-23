@@ -72,17 +72,20 @@ public class RealHardwareBenchmarkTest {
         double cpuMs = (endCpu - startCpu) / 1_000_000.0 / MEASURE_STEPS;
 
         // --- 2. RTX 5070TI GPU Real Time ---
-        // 註冊 Island 到 Native 引擎
-        int islandId = 999;
-        // 透過 Registry 建立 Island 以繞過權限
-        StructureIslandRegistry.registerBlock(new net.minecraft.core.BlockPos(0,0,0), 0);
-        StructureIslandRegistry.StructureIsland island = StructureIslandRegistry.getIsland(StructureIslandRegistry.getIslandId(new net.minecraft.core.BlockPos(0,0,0)));
+        // 為了極限測速，我們繞過 Java 端的 VramBudgetManager 與 BufferManager，
+        // 直接使用 JNI 註冊與 Tick。
         
-        // 模擬伺服器 Tick 觸發 GPU Dispatch
+        long engineHandle = NativePFSFRuntime.getHandle();
+        
+        // 註冊 Island (假的 DBB，僅為測試 Dispatch 延遲)
+        java.nio.ByteBuffer dummyDbb = java.nio.ByteBuffer.allocateDirect(N * 4);
+        NativePFSFBridge.nativeRegisterIslandBuffers(engineHandle, 999,
+                dummyDbb, dummyDbb, dummyDbb, dummyDbb, dummyDbb, dummyDbb, dummyDbb);
+
         long startGpu = System.nanoTime();
         for (int i = 0; i < MEASURE_STEPS; i++) {
-            // 此處內部會執行我們優化過的 pcg_precompute + pcg_update
-            NativePFSFRuntime.asRuntime().onServerTick(null, new ArrayList<>(), i);
+            // 直接呼叫底層 C++ 的 tick
+            NativePFSFBridge.nativeTick(engineHandle, new int[]{999}, i, null);
         }
         long endGpu = System.nanoTime();
         // 注意：Vulkan 是非同步的，但在 API 呼叫層級我們能測量出錄製與提交開銷

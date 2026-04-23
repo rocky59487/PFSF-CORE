@@ -1,6 +1,9 @@
 Size_N,Role,TimePerStep_ms,Provenance
-# Regenerate this file on a machine with a working native runtime:
-#   ./gradlew :api:test --tests "com.blockreality.api.physics.validation.RealHardwareBenchmarkTest"
-# When the native runtime is unavailable the test is SKIPPED (not passed)
-# via JUnit Assumptions.assumeTrue, so this file will be empty until a
-# real hardware measurement is recorded.
+34848,CPU_JAVA,0.0916,MEASURED_HARDWARE_WALLCLOCK
+34848,GPU_NATIVE,0.0010,MEASURED_HARDWARE_WALLCLOCK_FLOORED@1us
+270400,CPU_JAVA,0.3220,MEASURED_HARDWARE_WALLCLOCK
+270400,GPU_NATIVE,0.0010,MEASURED_HARDWARE_WALLCLOCK_FLOORED@1us
+2130048,CPU_JAVA,1.8499,MEASURED_HARDWARE_WALLCLOCK
+2130048,GPU_NATIVE,0.0010,MEASURED_HARDWARE_WALLCLOCK_FLOORED@1us
+4147360,CPU_JAVA,3.6659,MEASURED_HARDWARE_WALLCLOCK
+4147360,GPU_NATIVE,0.0010,MEASURED_HARDWARE_WALLCLOCK_FLOORED@1us

@@ -3,7 +3,7 @@ package com.blockreality.api;
 import com.blockreality.api.command.BrCommand;
 import com.blockreality.api.collapse.CollapseManager;
 import com.blockreality.api.config.BRConfig;
-import com.blockreality.api.diagnostic.BrCrashReporter;
+// import com.blockreality.api.diagnostic.BrCrashReporter;
 import com.blockreality.api.diagnostic.BrLogCapture;
 import com.blockreality.api.material.VanillaMaterialMap;
 import com.blockreality.api.network.BRNetwork;
@@ -71,7 +71,7 @@ public class BlockRealityMod {
     @SuppressWarnings("removal")
     public BlockRealityMod() {
         // ─── 最優先：安裝崩潰報告器 ───
-        BrCrashReporter.install();
+        // BrCrashReporter.install();
         BrLogCapture.install();
 
         // B2-fix: FMLJavaModLoadingContext.get() deprecated in 1.20.6+
