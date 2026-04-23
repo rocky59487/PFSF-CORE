@@ -89,7 +89,11 @@ public final class NativePFSFRuntime {
                 byte[] bytes = in.readAllBytes();
                 java.nio.ByteBuffer dbb = java.nio.ByteBuffer.allocateDirect(bytes.length);
                 dbb.put(bytes);
-                dbb.flip();  // reset position so native GetDirectBufferAddress reads from 0
+                // Native side reads via GetDirectBufferAddress + GetDirectBufferCapacity
+                // (both position-independent), so flip() is not strictly required.
+                // Call it anyway so the buffer round-trips cleanly if a future
+                // position-aware reader is introduced on either side.
+                dbb.flip();
                 String canonicalName = "compute/" + s;
                 NativePFSFBridge.nativeRegisterShader(canonicalName, dbb);
                 registered++;

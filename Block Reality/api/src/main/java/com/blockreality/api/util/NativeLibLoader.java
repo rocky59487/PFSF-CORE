@@ -194,7 +194,19 @@ public final class NativeLibLoader {
             if (Files.isDirectory(tasks)) return tasks;
         }
         String tmp = System.getProperty("java.io.tmpdir");
-        return (tmp != null && !tmp.isEmpty()) ? Paths.get(tmp) : Paths.get(".");
+        if (tmp != null && !tmp.isEmpty()) {
+            Path t = Paths.get(tmp);
+            if (Files.isDirectory(t)) return t;
+        }
+        // Mod-loader sandboxes sometimes override java.io.tmpdir to a
+        // read-only path, leaving us with nowhere to extract. Fall back
+        // to the user home so we never land on "." (which on jar-only
+        // installs is the launcher dir, often read-only too).
+        String home = System.getProperty("user.home");
+        if (home != null && !home.isEmpty()) {
+            return Paths.get(home, ".blockreality-native");
+        }
+        return Paths.get(".");
     }
 
     /**
