@@ -450,6 +450,16 @@ public final class VulkanComputeContext {
     /** PFSF Vulkan Compute 是否成功初始化。 */
     public static boolean isComputeSupported() { return computeSupported; }
 
+    // ─── Raw Vulkan handle getters for cross-module sharing (libpfsf JNI) ───
+    // These expose the exact 64-bit handle values that Vulkan uses internally,
+    // so the C++ side can cast them back to VkInstance / VkDevice / VkQueue
+    // and skip creating its own instance. Returns 0 when not initialised.
+    public static long getVkInstanceHandle()       { return vkInstance; }
+    public static long getVkPhysicalDeviceHandle() { return vkPhysicalDevice; }
+    public static long getVkDeviceHandle()         { return vkDevice; }
+    public static long getVkComputeQueueHandle()   { return computeQueue; }
+    public static int  getComputeQueueFamily()     { return computeQueueFamily; }
+
     // ═══════════════════════════════════════════════════════════════
     //  Buffer Allocation (VMA)
     // ═══════════════════════════════════════════════════════════════

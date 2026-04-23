@@ -24,6 +24,14 @@ public:
     VulkanContext& operator=(const VulkanContext&) = delete;
 
     bool init();
+    /// Adopt Vulkan handles owned by another module (typically the Java
+    /// host). This context will NOT destroy them on shutdown; only the
+    /// VMA allocator + cmdPool it creates here are torn down.
+    bool initFromExisting(VkInstance inst,
+                          VkPhysicalDevice phys,
+                          VkDevice dev,
+                          uint32_t queueFamily,
+                          VkQueue computeQueue);
     void shutdown();
 
     bool isAvailable() const { return available_; }
@@ -70,6 +78,10 @@ private:
 
     VmaAllocator     allocator_      = nullptr;
     std::unordered_map<VkBuffer, VmaAllocation> allocationMap_;
+
+    /// True when this context created the instance/device and should
+    /// destroy them on shutdown. False when adopted via initFromExisting.
+    bool             ownsHandles_    = true;
 };
 
 } // namespace pfsf

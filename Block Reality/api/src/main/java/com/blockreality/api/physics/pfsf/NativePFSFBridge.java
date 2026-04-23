@@ -190,6 +190,24 @@ public final class NativePFSFBridge {
                                             boolean enablePhaseField,
                                             boolean enableMultigrid);
 
+    /**
+     * Creates an engine that adopts the caller-supplied Vulkan handles
+     * instead of building its own VkInstance / VkDevice pair. All handles
+     * must be valid ({@code != 0}) or the native side returns {@code 0}.
+     * The caller retains ownership of every handle; destroying the engine
+     * will not destroy the Vulkan objects.
+     */
+    public static native long nativeCreateWithVulkan(int maxIslandSize,
+                                                      int tickBudgetMs,
+                                                      long vramBudgetBytes,
+                                                      boolean enablePhaseField,
+                                                      boolean enableMultigrid,
+                                                      long vkInstance,
+                                                      long vkPhysicalDevice,
+                                                      long vkDevice,
+                                                      int computeQueueFamily,
+                                                      long vkComputeQueue);
+
     /** Initialises Vulkan + pipelines. Returns a {@link PFSFResult} code. */
     public static native int nativeInit(long handle);
 

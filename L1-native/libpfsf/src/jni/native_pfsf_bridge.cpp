@@ -68,6 +68,19 @@ extern "C" {
  *  Lifecycle
  * ═══════════════════════════════════════════════════════════════ */
 
+static pfsf_config jni_build_config(jint maxIslandSize, jint tickBudgetMs,
+                                    jlong vramBudgetBytes, jboolean enablePhaseField,
+                                    jboolean enableMultigrid) {
+    pfsf_config cfg{};
+    cfg.max_island_size    = (maxIslandSize > 0) ? maxIslandSize : 50000;
+    cfg.tick_budget_ms     = (tickBudgetMs > 0) ? tickBudgetMs : 8;
+    cfg.vram_budget_bytes  = (vramBudgetBytes > 0) ? vramBudgetBytes
+                                                    : (512LL * 1024 * 1024);
+    cfg.enable_phase_field = (enablePhaseField == JNI_TRUE);
+    cfg.enable_multigrid   = (enableMultigrid  == JNI_TRUE);
+    return cfg;
+}
+
 JNIEXPORT jlong JNICALL
 Java_com_blockreality_api_physics_pfsf_NativePFSFBridge_nativeCreate(
         JNIEnv* env, jclass,
@@ -77,16 +90,36 @@ Java_com_blockreality_api_physics_pfsf_NativePFSFBridge_nativeCreate(
         jboolean enablePhaseField,
         jboolean enableMultigrid) {
     (void) env;
-
-    pfsf_config cfg{};
-    cfg.max_island_size    = (maxIslandSize > 0) ? maxIslandSize : 50000;
-    cfg.tick_budget_ms     = (tickBudgetMs > 0) ? tickBudgetMs : 8;
-    cfg.vram_budget_bytes  = (vramBudgetBytes > 0) ? vramBudgetBytes
-                                                    : (512LL * 1024 * 1024);
-    cfg.enable_phase_field = (enablePhaseField == JNI_TRUE);
-    cfg.enable_multigrid   = (enableMultigrid  == JNI_TRUE);
-
+    pfsf_config cfg = jni_build_config(maxIslandSize, tickBudgetMs, vramBudgetBytes,
+                                       enablePhaseField, enableMultigrid);
     pfsf_engine e = pfsf_create(&cfg);
+    return as_handle(e);
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_blockreality_api_physics_pfsf_NativePFSFBridge_nativeCreateWithVulkan(
+        JNIEnv* env, jclass,
+        jint    maxIslandSize,
+        jint    tickBudgetMs,
+        jlong   vramBudgetBytes,
+        jboolean enablePhaseField,
+        jboolean enableMultigrid,
+        jlong    vkInstance,
+        jlong    vkPhysicalDevice,
+        jlong    vkDevice,
+        jint     computeQueueFamily,
+        jlong    vkComputeQueue) {
+    (void) env;
+    pfsf_config cfg = jni_build_config(maxIslandSize, tickBudgetMs, vramBudgetBytes,
+                                       enablePhaseField, enableMultigrid);
+    pfsf_vulkan_handles h{};
+    h.vk_instance          = static_cast<uint64_t>(vkInstance);
+    h.vk_physical_device   = static_cast<uint64_t>(vkPhysicalDevice);
+    h.vk_device            = static_cast<uint64_t>(vkDevice);
+    h.compute_queue_family = (computeQueueFamily >= 0)
+                              ? static_cast<uint32_t>(computeQueueFamily) : 0u;
+    h.vk_compute_queue     = static_cast<uint64_t>(vkComputeQueue);
+    pfsf_engine e = pfsf_create_with_vulkan(&cfg, &h);
     return as_handle(e);
 }
 

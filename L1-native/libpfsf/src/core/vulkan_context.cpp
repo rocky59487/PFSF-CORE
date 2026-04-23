@@ -155,16 +155,67 @@ bool VulkanContext::init() {
     return true;
 }
 
+bool VulkanContext::initFromExisting(VkInstance inst,
+                                     VkPhysicalDevice phys,
+                                     VkDevice dev,
+                                     uint32_t queueFamily,
+                                     VkQueue computeQueue) {
+    if (available_) return true;
+    if (inst == VK_NULL_HANDLE || phys == VK_NULL_HANDLE ||
+        dev  == VK_NULL_HANDLE || computeQueue == VK_NULL_HANDLE) {
+        fprintf(stderr, "[libpfsf] initFromExisting: null handle rejected\n");
+        return false;
+    }
+
+    instance_           = inst;
+    physDevice_         = phys;
+    device_             = dev;
+    computeQueueFamily_ = queueFamily;
+    computeQueue_       = computeQueue;
+    ownsHandles_        = false;
+
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(phys, &props);
+    deviceName_ = props.deviceName;
+
+    VkCommandPoolCreateInfo cpCI = {};
+    cpCI.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    cpCI.queueFamilyIndex = queueFamily;
+    cpCI.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    if (vkCreateCommandPool(device_, &cpCI, nullptr, &cmdPool_) != VK_SUCCESS) {
+        fprintf(stderr, "[libpfsf] initFromExisting: vkCreateCommandPool FAILED\n");
+        return false;
+    }
+
+    VmaAllocatorCreateInfo vmaCI = {};
+    vmaCI.vulkanApiVersion = VK_API_VERSION_1_2;
+    vmaCI.physicalDevice = physDevice_;
+    vmaCI.device = device_;
+    vmaCI.instance = instance_;
+    if (vmaCreateAllocator(&vmaCI, &allocator_) != VK_SUCCESS) {
+        fprintf(stderr, "[libpfsf] initFromExisting: VMA FAILED\n");
+        vkDestroyCommandPool(device_, cmdPool_, nullptr);
+        cmdPool_ = VK_NULL_HANDLE;
+        return false;
+    }
+
+    available_ = true;
+    fprintf(stderr, "[libpfsf] Vulkan adopted from Java host on device: %s\n", deviceName_.c_str());
+    return true;
+}
+
 void VulkanContext::shutdown() {
     if (device_) {
         vkDeviceWaitIdle(device_);
         if (allocator_) vmaDestroyAllocator(allocator_);
         if (cmdPool_) vkDestroyCommandPool(device_, cmdPool_, nullptr);
-        vkDestroyDevice(device_, nullptr);
+        if (ownsHandles_) vkDestroyDevice(device_, nullptr);
     }
-    if (instance_) vkDestroyInstance(instance_, nullptr);
+    if (instance_ && ownsHandles_) vkDestroyInstance(instance_, nullptr);
     instance_ = VK_NULL_HANDLE; device_ = VK_NULL_HANDLE; cmdPool_ = VK_NULL_HANDLE;
+    allocator_ = nullptr;
     available_ = false;
+    ownsHandles_ = true;
 }
 
 bool VulkanContext::selectPhysicalDevice() {

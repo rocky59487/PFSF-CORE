@@ -140,7 +140,30 @@ public final class NativePFSFRuntime {
                 pcgEnabled = BRConfig.isPFSFPCGEnabled();
             } catch (Throwable ignored) {}
 
-            h = NativePFSFBridge.nativeCreate(50_000, Math.max(1, budget), 512L * 1024 * 1024, true, true);
+            long vkInst  = VulkanComputeContext.getVkInstanceHandle();
+            long vkPhys  = VulkanComputeContext.getVkPhysicalDeviceHandle();
+            long vkDev   = VulkanComputeContext.getVkDeviceHandle();
+            long vkQueue = VulkanComputeContext.getVkComputeQueueHandle();
+            int  vkQf    = VulkanComputeContext.getComputeQueueFamily();
+            boolean shareVk = VulkanComputeContext.isComputeSupported()
+                    && vkInst != 0L && vkPhys != 0L && vkDev != 0L && vkQueue != 0L && vkQf >= 0;
+
+            if (shareVk) {
+                try {
+                    h = NativePFSFBridge.nativeCreateWithVulkan(
+                            50_000, Math.max(1, budget), 512L * 1024 * 1024,
+                            true, true,
+                            vkInst, vkPhys, vkDev, vkQf, vkQueue);
+                    LOGGER.info("Native PFSF sharing Vulkan instance/device with Java host.");
+                } catch (UnsatisfiedLinkError missing) {
+                    // Older native binary without the shared-handle entrypoint.
+                    LOGGER.warn("nativeCreateWithVulkan not present in native lib; falling back to standalone.");
+                    h = 0L;
+                }
+            }
+            if (h == 0L) {
+                h = NativePFSFBridge.nativeCreate(50_000, Math.max(1, budget), 512L * 1024 * 1024, true, true);
+            }
             if (h == 0L) return;
 
             int rc = NativePFSFBridge.nativeInit(h);
