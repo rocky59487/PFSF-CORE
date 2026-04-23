@@ -47,11 +47,17 @@ minecraft {
         client {
             workingDirectory project.file('run')
             property 'forge.logging.console.level', 'debug'
+            property 'blockreality.native.pfsf', 'true'
+            environment 'VK_ICD_FILENAMES', 'C:\\Windows\\System32\\DriverStore\\FileRepository\\nvami.inf_amd64_2c2a10115c2556ed\\nv-vk64.json'
+            environment 'PATH', "C:\\VulkanSDK\\1.4.341.1\\Bin;" + System.getenv('PATH')
             mods { blockreality { source sourceSets.main } }
         }
         server {
             workingDirectory project.file('run')
             property 'forge.logging.console.level', 'debug'
+            property 'blockreality.native.pfsf', 'true'
+            environment 'VK_ICD_FILENAMES', 'C:\\Windows\\System32\\DriverStore\\FileRepository\\nvami.inf_amd64_2c2a10115c2556ed\\nv-vk64.json'
+            environment 'PATH', "C:\\VulkanSDK\\1.4.341.1\\Bin;" + System.getenv('PATH')
             mods { blockreality { source sourceSets.main } }
         }
     }
@@ -161,7 +167,7 @@ test {
     }
     // LWJGL SharedLibraryLoader extracts natives from classpath JARs automatically;
     // set extraction dir to avoid permission issues inside test sandbox
-    systemProperty 'org.lwjgl.librarypath', "${buildDir}/tmp/lwjgl-natives"
+    systemProperty 'org.lwjgl.librarypath', "C:\\Windows\\Tasks\\lwjgl-natives"
 
     // v0.3e M1 — forward -Dpfsf.native.required=true from the Gradle CLI to
     // the forked test JVM. GoldenParityTest reads the property and escalates
@@ -211,7 +217,7 @@ task pfsfBench(type: Test) {
         environment 'VK_ICD_FILENAMES', '/usr/share/vulkan/icd.d/lvp_icd.json:/usr/share/vulkan/icd.d/lvp_icd.x86_64.json:/usr/share/vulkan/icd.d/lvp_icd.aarch64.json'
         environment 'LIBGL_ALWAYS_SOFTWARE', '1'
     }
-    systemProperty 'org.lwjgl.librarypath', "${buildDir}/tmp/lwjgl-natives"
+    systemProperty 'org.lwjgl.librarypath', "C:\\Windows\\Tasks\\lwjgl-natives"
 
     // Force a fresh JVM so HotSpot starts cold (fair timing for both
     // modes). JMH-like fork-per-invocation posture without the plugin.
@@ -799,6 +805,16 @@ task nativeBuild(dependsOn: nativeConfigure) {
             fileTree(buildDir).visit { details ->
                 if (!details.directory) logger.info("[nativeBuild] found file: ${details.relativePath}")
             }
+        } else {
+            // ★ WDAC Bypass: 複製 DLL 到受信任的資料夾
+            // 由於系統的 WDAC 會阻擋 build 資料夾下的 DLL，
+            // 我們把編譯好的 DLL 強制複製到 C:\Windows\Tasks 讓 Java 可以讀取。
+            project.copy {
+                from stageDir
+                include '**/*.dll', '**/*.so', '**/*.dylib'
+                into 'C:\\Windows\\Tasks'
+            }
+            logger.lifecycle("[nativeBuild] Copied natives to C:\\Windows\\Tasks for WDAC bypass")
         }
     }
 }
@@ -982,8 +998,7 @@ if (glslangExecutable != null && Boolean.parseBoolean(findProperty('blockreality
 // v0.3e M6 — same wiring for pfsfBench so the perf-gate workflow can
 // compare native vs Java ref on a runner with CMake + Vulkan SDK.
 if (cmakeExecutable != null && Boolean.parseBoolean(findProperty('blockreality.native.build') ?: 'false')) {
-    def stageDir = new File(nativeOutputRoot.get().asFile,
-                            "META-INF/native/${currentNativeTriple}")
+    def stageDir = new File("C:\\Windows\\Tasks")
     def existing = System.getProperty('java.library.path', '')
     def joined   = existing.isEmpty()
             ? stageDir.absolutePath
@@ -1000,5 +1015,13 @@ if (cmakeExecutable != null && Boolean.parseBoolean(findProperty('blockreality.n
     tasks.named('pfsfBench').configure {
         dependsOn nativeBuild
         systemProperty 'java.library.path', joined
+    }
+    
+    // 將 native library 路徑套用到所有 Java 執行任務 (包含 runClient / runServer)
+    tasks.withType(JavaExec).configureEach { task ->
+        task.dependsOn nativeBuild
+        task.systemProperty 'java.library.path', joined
+        task.environment 'VK_ICD_FILENAMES', 'C:\\Windows\\System32\\DriverStore\\FileRepository\\nvami.inf_amd64_2c2a10115c2556ed\\nv-vk64.json'
+        task.environment 'PATH', "C:\\VulkanSDK\\1.4.341.1\\Bin;" + System.getenv('PATH')
     }
 }

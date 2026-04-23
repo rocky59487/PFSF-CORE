@@ -63,6 +63,7 @@ endif()
 set_target_properties(br_core PROPERTIES
     WINDOWS_EXPORT_ALL_SYMBOLS ON
     POSITION_INDEPENDENT_CODE ON
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
 )
 
 # PR#187 capy-ai R3106195658 / R3106213993:

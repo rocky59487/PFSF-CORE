@@ -113,7 +113,7 @@ target_compile_definitions(pfsf PRIVATE PFSF_USE_BR_CORE=1)
 # ── JNI bridge ──
 if(PFSF_BUILD_JNI AND JNI_FOUND)
     add_library(blockreality_pfsf SHARED src/jni/native_pfsf_bridge.cpp)
-    target_link_libraries(blockreality_pfsf PRIVATE pfsf_static JNI::JNI)
+    target_link_libraries(blockreality_pfsf PRIVATE pfsf JNI::JNI)
     target_include_directories(blockreality_pfsf PRIVATE ${JNI_INCLUDE_DIRS})
     target_link_libraries(blockreality_pfsf PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,pfsf_compute>)
     target_compile_definitions(blockreality_pfsf PRIVATE PFSF_USE_BR_CORE=1)
@@ -129,6 +129,7 @@ if(PFSF_BUILD_JNI AND JNI_FOUND)
     if(NOT WIN32)
         set_target_properties(blockreality_pfsf PROPERTIES PREFIX "lib")
     endif()
+    set_target_properties(blockreality_pfsf PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
 # --- HARDWARE PROOF ---

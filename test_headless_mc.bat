@@ -4,4 +4,4 @@ set VULKAN_SDK=C:\VulkanSDK\1.4.341.1
 cd "Block Reality"
 echo stop > stop.txt
 echo Running Forge Server for headless integration testing...
-call gradlew.bat :fastdesign:runServer < stop.txt
+call gradlew.bat :api:runServer "-Pblockreality.native.build=true" "-Pblockreality.native.shaders=true" "-Dblockreality.native.pfsf=true" < stop.txt
