@@ -250,14 +250,15 @@ cmake --install .
 
 ### 2. sigmaMax 正規化約定（PFSF 核心）
 
-`PFSFDataBuilder` 上傳 GPU 前會除以 `sigmaMax`。任何新增的 threshold buffer **必須**同步處理：
+`PFSFDataBuilder` 上傳 GPU 前會除以 `sigmaMax`。任何新增的 threshold buffer **必須**同步處理，
+但 `maxPhi` 例外（phi 場是標度不變的，閾值不可縮放，詳見 `PFSFDataBuilder.java:261-269`）：
 
 ```java
 conductivity[i] /= sigmaMax;   // → [0, 1]
 source[i]       /= sigmaMax;
-maxPhi[i]       /= sigmaMax;   // 懸臂閾值
 rcomp[i]        /= sigmaMax;   // 壓碎閾值
 rtens[i]        /= sigmaMax;   // 拉斷閾值
+// maxPhi[i]     保持不變     // 懸臂閾值——phi 標度不變，閾值不可縮放
 // phi 場不變（A·φ=b 兩邊同除自動抵消）
 ```
 
@@ -265,8 +266,8 @@ rtens[i]        /= sigmaMax;   // 拉斷閾值
 
 RBGS、Jacobi、PCG matvec **必須**使用完全相同的 26 連通 stencil：
 - 6 面鄰居：`×1.0`
-- 12 邊鄰居：`×0.35`（`SHEAR_EDGE_PENALTY`）
-- 8 角鄰居：`×0.15`（`SHEAR_CORNER_PENALTY`）
+- 12 邊鄰居：`×0.5`（`EDGE_P`，Shinozaki–Oono 各向同性權重）
+- 8 角鄰居：`×0.1666667`（`CORNER_P`，即 1/6）
 
 任一 shader 不一致 → CG 收斂到錯誤解 / 多網格發散。
 

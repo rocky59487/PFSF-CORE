@@ -147,12 +147,18 @@ test {
     useJUnitPlatform()
 
     // ★ Vulkan smoke tests：lavapipe ICD + software renderer
-    // Colon-separated — the Vulkan loader iterates the list and silently
-    // skips missing paths. Ubuntu 22.04's mesa-vulkan-drivers installs
-    // the lavapipe ICD as lvp_icd.x86_64.json (noble ships the short
-    // name), so accept both.
-    environment 'VK_ICD_FILENAMES', '/usr/share/vulkan/icd.d/lvp_icd.json:/usr/share/vulkan/icd.d/lvp_icd.x86_64.json:/usr/share/vulkan/icd.d/lvp_icd.aarch64.json'
-    environment 'LIBGL_ALWAYS_SOFTWARE', '1'
+    //
+    // LINUX ONLY. On Linux, Vulkan ICD manifest paths in VK_ICD_FILENAMES
+    // are colon-separated and live under /usr/share/vulkan/icd.d/. On
+    // Windows the separator is ';' and the same paths are invalid, which
+    // breaks the Vulkan loader and would surface as spurious
+    // VK_ERROR_INCOMPATIBLE_DRIVER during NativeIsolationTest (see
+    // research/PFSF_GPU_ACADEMIC_AUDIT_2026-04-23.md §1). So we only
+    // inject the overrides when the build host is Linux.
+    if (org.gradle.internal.os.OperatingSystem.current().isLinux()) {
+        environment 'VK_ICD_FILENAMES', '/usr/share/vulkan/icd.d/lvp_icd.json:/usr/share/vulkan/icd.d/lvp_icd.x86_64.json:/usr/share/vulkan/icd.d/lvp_icd.aarch64.json'
+        environment 'LIBGL_ALWAYS_SOFTWARE', '1'
+    }
     // LWJGL SharedLibraryLoader extracts natives from classpath JARs automatically;
     // set extraction dir to avoid permission issues inside test sandbox
     systemProperty 'org.lwjgl.librarypath', "${buildDir}/tmp/lwjgl-natives"
@@ -200,13 +206,11 @@ task pfsfBench(type: Test) {
     systemProperty 'pfsf.bench.out', outFile.absolutePath
 
     // Forward the Vulkan/ICD env from the main test task so native mode
-    // can load its shared library.
-    // Colon-separated — the Vulkan loader iterates the list and silently
-    // skips missing paths. Ubuntu 22.04's mesa-vulkan-drivers installs
-    // the lavapipe ICD as lvp_icd.x86_64.json (noble ships the short
-    // name), so accept both.
-    environment 'VK_ICD_FILENAMES', '/usr/share/vulkan/icd.d/lvp_icd.json:/usr/share/vulkan/icd.d/lvp_icd.x86_64.json:/usr/share/vulkan/icd.d/lvp_icd.aarch64.json'
-    environment 'LIBGL_ALWAYS_SOFTWARE', '1'
+    // can load its shared library. LINUX ONLY (see :test for rationale).
+    if (org.gradle.internal.os.OperatingSystem.current().isLinux()) {
+        environment 'VK_ICD_FILENAMES', '/usr/share/vulkan/icd.d/lvp_icd.json:/usr/share/vulkan/icd.d/lvp_icd.x86_64.json:/usr/share/vulkan/icd.d/lvp_icd.aarch64.json'
+        environment 'LIBGL_ALWAYS_SOFTWARE', '1'
+    }
     systemProperty 'org.lwjgl.librarypath', "${buildDir}/tmp/lwjgl-natives"
 
     // Force a fresh JVM so HotSpot starts cold (fair timing for both
@@ -715,7 +719,16 @@ task nativeConfigure {
                     '-DBR_BUILD_PFSF=ON',
                     '-DBR_BUILD_FLUID=OFF',
                     '-DBR_BUILD_RENDER=OFF',
-                    "-DBR_BUILD_SHADERS=OFF",
+                    // Always build the SPIR-V registry. When glslang is
+                    // present, shaders are compiled from source; otherwise
+                    // we fall back to the prebuilt blobs in
+                    // L1-native/shaders/prebuilt/. Prior releases hardcoded
+                    // -DBR_BUILD_SHADERS=OFF, which left br_shaders
+                    // undefined at link time and produced the runtime
+                    // "SPIR-V blob missing" failure documented in
+                    // research/PFSF_GPU_ACADEMIC_AUDIT_2026-04-23.md §3.
+                    '-DBR_BUILD_SHADERS=ON',
+                    "-DPFSF_ALLOW_PREBUILT_SPV=${shadersOn ? 'OFF' : 'ON'}",
                     '-DPFSF_BUILD_JNI=ON',
                     '-DPFSF_BUILD_EXAMPLE=OFF',
                     "-DPFSF_ABI_VERSION_STRING=${pfsfAbiVersion}"

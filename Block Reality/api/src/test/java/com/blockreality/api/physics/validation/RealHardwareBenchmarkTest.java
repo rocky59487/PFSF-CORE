@@ -3,8 +3,10 @@ package com.blockreality.api.physics.validation;
 import com.blockreality.api.physics.pfsf.*;
 import com.blockreality.api.physics.StructureIslandRegistry;
 import net.minecraft.core.BlockPos;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
@@ -12,30 +14,38 @@ import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 
 /**
- * 實體硬體對決：R9 8940HX (CPU) vs RTX 5070TI (GPU).
- * 這是您論文中最強而有力的實測數據。
+ * Real-hardware benchmark: measured CPU vs measured GPU wall-clock per Jacobi step.
+ *
+ * <p>Output CSV {@code research/paper_data/raw/real_hardware_performance.csv}
+ * contains only rows with {@code Provenance=MEASURED_HARDWARE}. If the native
+ * GPU runtime is not available the test is <b>skipped via
+ * {@link Assumptions#assumeTrue}</b> — it will NOT silently pass with an
+ * empty CSV, so downstream paper-data collectors can distinguish "no GPU
+ * measurement yet" from "GPU measurement completed".
  */
 public class RealHardwareBenchmarkTest {
 
     private static final String REAL_DATA_PATH = "../../research/paper_data/raw/real_hardware_performance.csv";
-    private static final int WARMUP_STEPS = 50;
     private static final int MEASURE_STEPS = 200;
 
     @Test
-    @DisplayName("5070TI vs R9 8940HX 性能實測")
+    @DisplayName("Measured CPU vs measured GPU (requires native runtime)")
     public void runRealBenchmark() throws IOException, InterruptedException {
-        Files.writeString(Paths.get(REAL_DATA_PATH), "Size_N,CPU_R9_ms,GPU_5070TI_ms,RealSpeedup\n", 
+        Files.writeString(Paths.get(REAL_DATA_PATH),
+                "Size_N,Role,TimePerStep_ms,Provenance\n",
                 StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
 
-        // 初始化 Native 環境 (確保 5070TI 被喚醒)
+        // Initialise native runtime (wakes the GPU if present).
         System.setProperty("blockreality.native.pfsf", "true");
         PFSFEngine.init();
-        Thread.sleep(1000); // 等待 Vulkan 初始化
+        Thread.sleep(1000);
 
-        if (!NativePFSFRuntime.asRuntime().isAvailable()) {
-            System.err.println("❌ ERROR: 5070TI Native Runtime NOT available! Check your Vulkan drivers.");
-            return;
-        }
+        // Strict: if no GPU, record nothing and mark the test as skipped.
+        // This prevents an empty CSV + green test from being mistaken for
+        // a successful measurement during paper-data aggregation.
+        Assumptions.assumeTrue(
+                NativePFSFRuntime.asRuntime().isAvailable(),
+                "Native PFSF runtime unavailable — test skipped; no GPU rows will be written.");
 
         int[] sizes = {32, 64, 128, 160}; // 測試到大型結構
         for (int L : sizes) {
@@ -79,14 +89,24 @@ public class RealHardwareBenchmarkTest {
         // 真實數據建議使用內部 GPU Timestamp，此處為 Wall-clock 測量
         double gpuMs = (endGpu - startGpu) / 1_000_000.0 / MEASURE_STEPS;
         
-        // 校正：如果 GPU 太快導致計時誤差，給予最低延遲保護
-        if (gpuMs < 0.001) gpuMs = 0.001;
+        // Floor the wall-clock reading only if it lies below the measurement
+        // quantum we can trust. Document the floor in the CSV provenance so
+        // no reader can mistake the floored value for a true sub-microsecond
+        // measurement.
+        String gpuProvenance = "MEASURED_HARDWARE_WALLCLOCK";
+        if (gpuMs < 0.001) {
+            gpuMs = 0.001;
+            gpuProvenance = "MEASURED_HARDWARE_WALLCLOCK_FLOORED@1us";
+        }
 
-        double speedup = cpuMs / gpuMs;
+        writeRow(N, "CPU_JAVA", cpuMs, "MEASURED_HARDWARE_WALLCLOCK");
+        writeRow(N, "GPU_NATIVE", gpuMs, gpuProvenance);
 
-        String result = String.format("%d,%.4f,%.4f,%.2fx\n", N, cpuMs, gpuMs, speedup);
-        Files.writeString(Paths.get(REAL_DATA_PATH), result, StandardOpenOption.APPEND);
-        
-        System.out.println(">>> [HARDWARE] N=" + N + " | R9-8940HX: " + String.format("%.3f", cpuMs) + "ms | 5070TI: " + String.format("%.3f", gpuMs) + "ms | Speedup: " + String.format("%.1f", speedup) + "x");
+        System.out.printf(">>> [HARDWARE] N=%d  CPU=%.3fms  GPU=%.3fms%n", N, cpuMs, gpuMs);
+    }
+
+    private static void writeRow(int N, String role, double ms, String provenance) throws IOException {
+        String row = String.format("%d,%s,%.4f,%s%n", N, role, ms, provenance);
+        Files.writeString(Paths.get(REAL_DATA_PATH), row, StandardOpenOption.APPEND);
     }
 }
