@@ -98,23 +98,60 @@ public class CollapseManager {
      * collapse so the existing batch pipeline ({@code processQueue},
      * overflow buffer, particle effects) handles the actual destruction.
      *
-     * <p>If {@link StructureIslandRegistry.OrphanIslandEvent#level()} is
-     * null (the {@code flushDestructions} path does not propagate a level),
-     * we log once and skip — the caller needs a level to destroy blocks
-     * via Minecraft's API and we have no reliable way to recover it
-     * here. Future refactors may thread a level through that path.
+     * <p>When {@link StructureIslandRegistry.OrphanIslandEvent#level()}
+     * is null — today's {@code flushDestructions} path — the event is
+     * appended to {@link OrphanReplayBuffer} instead of being dropped.
+     * {@link #flushPendingOrphans(ServerLevel)} replays the buffer on
+     * the next server tick against a known level so batched orphan
+     * fragments still collapse, at most one tick late.
      */
     public static void onOrphanIsland(StructureIslandRegistry.OrphanIslandEvent event) {
+        if (event.members().isEmpty()) return;
         ServerLevel level = event.level();
         if (level == null) {
-            LOGGER.warn("[Collapse] Orphan island {} ({} blocks) has no ServerLevel (flushDestructions path); cannot enqueue collapse",
+            OrphanReplayBuffer.add(event.islandId(), event.members());
+            LOGGER.debug("[Collapse] Buffered orphan island {} ({} blocks) for next-tick replay (no ServerLevel)",
                     event.islandId(), event.members().size());
             return;
         }
-        if (event.members().isEmpty()) return;
         LOGGER.info("[Collapse] Orphan island {} ({} blocks) from tick-local fracture; enqueueing NO_SUPPORT collapse",
                 event.islandId(), event.members().size());
         enqueueCollapse(level, event.members(), FailureType.NO_SUPPORT);
+    }
+
+    /**
+     * Replay every orphan event buffered by {@link #onOrphanIsland}
+     * against the supplied {@link ServerLevel}. {@code ServerTickHandler}
+     * calls this once per tick per loaded dimension; the first call
+     * to receive a non-empty buffer drains it.
+     *
+     * <p>Buffered events do not carry dimension information (the
+     * originating {@code flushDestructions} call-site has no level),
+     * so the first dimension to reach this method each tick takes
+     * them. Multi-world callers should prefer the synchronous
+     * {@link StructureIslandRegistry#unregisterBlock} path, which
+     * preserves the originating level end-to-end.
+     *
+     * @return the number of orphan events replayed this call.
+     */
+    public static int flushPendingOrphans(ServerLevel level) {
+        if (level == null) return 0;
+        java.util.List<OrphanReplayBuffer.PendingOrphan> drained = OrphanReplayBuffer.drain();
+        int count = 0;
+        for (OrphanReplayBuffer.PendingOrphan o : drained) {
+            if (o.members().isEmpty()) continue;
+            enqueueCollapse(level, o.members(), FailureType.NO_SUPPORT);
+            count++;
+        }
+        if (count > 0) {
+            LOGGER.info("[Collapse] Replayed {} buffered orphan island(s) on tick-flush", count);
+        }
+        return count;
+    }
+
+    /** Size of the pending replay buffer. Primarily for monitoring. */
+    public static int getPendingOrphanCount() {
+        return OrphanReplayBuffer.size();
     }
 
     /**
