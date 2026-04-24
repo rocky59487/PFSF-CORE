@@ -168,6 +168,34 @@ public class StructureIslandRegistry {
         return id != null ? id : -1;
     }
 
+    /** Records the last topology tick at which each int id was seen dirty. */
+    private static final ConcurrentHashMap<Integer, Long> lastMutationTick = new ConcurrentHashMap<>();
+
+    /**
+     * Current topology tick from the underlying {@link PersistentIslandTracker}.
+     * Advances once per {@link #advanceTopology(long)} call. Downstream
+     * systems use this as the universal clock for "has anything
+     * changed since I last ran" queries, replacing the ad-hoc
+     * ALWAYS_DIRTY / {@code lastModifiedEpoch} Long.MAX_VALUE sentinel
+     * which never reflected the actual topology clock.
+     */
+    public static long getTopologyTick() {
+        return topology.getTracker().currentTick();
+    }
+
+    /**
+     * True when the island's voxel set has not mutated since
+     * {@code sinceTick}. Callers that already processed this island on
+     * or after {@code sinceTick} can use this as an early-skip — the
+     * component is topologically clean, no GPU re-solve is required
+     * for shape-change reasons (force / material changes still need
+     * to be handled by their own paths).
+     */
+    public static boolean topologicallyClean(int islandId, long sinceTick) {
+        Long t = lastMutationTick.get(islandId);
+        return t == null || t <= sinceTick;
+    }
+
     /**
      * 將於 split 結束時傳送給 {@link #orphanListener} 的事件。
      * {@code level} 為觸發本次 split 的 ServerLevel（若呼叫者有提供，
@@ -216,6 +244,7 @@ public class StructureIslandRegistry {
         topology.reset();
         fingerprintToIntId.clear();
         intIdToFingerprint.clear();
+        lastMutationTick.clear();
     }
 
     /**
@@ -284,6 +313,16 @@ public class StructureIslandRegistry {
         private volatile int minX, minY, minZ, maxX, maxY, maxZ;
         private volatile long lastModifiedEpoch;
 
+        /**
+         * The oldest surviving member, used as the Elder-Rule seed when
+         * {@link StructureIslandRegistry#checkAndSplitIsland} needs to
+         * pick which fragment keeps this island's int id. Set to the
+         * voxel that caused the island's creation; refreshed on the
+         * next addMember when the original birth voxel is removed.
+         * {@code null} briefly between full-decay and removal.
+         */
+        private volatile BlockPos birthVoxel;
+
         // ─── B1: Centre-of-mass cache ───
         // NaN signals "needs recomputation". Invalidated on every addMember/removeMember.
         private volatile double cachedComX = Double.NaN;
@@ -322,11 +361,20 @@ public class StructureIslandRegistry {
             maxX = Math.max(maxX, pos.getX());
             maxY = Math.max(maxY, pos.getY());
             maxZ = Math.max(maxZ, pos.getZ());
+            if (birthVoxel == null) birthVoxel = pos;
             invalidateCoM();
         }
 
         synchronized void removeMember(BlockPos pos) {
             members.remove(pos);
+            if (pos.equals(birthVoxel)) {
+                // Elder-Rule seed was just broken. Pick any surviving
+                // member as the new seed; on the next split we fall
+                // back to "anchored+largest" if the new seed is also
+                // absent from the kept component, which is still a
+                // monotonic improvement over no seed at all.
+                birthVoxel = members.isEmpty() ? null : members.iterator().next();
+            }
             invalidateCoM();
         }
 
@@ -585,6 +633,12 @@ public class StructureIslandRegistry {
         StructureIsland island = islands.get(islandId);
         if (island != null) {
             island.touch(ALWAYS_DIRTY); // Long.MAX_VALUE sentinel — 永遠比任何 counter epoch 大
+            // Stamp the topology-clock mutation tick too so consumers
+            // using topologicallyClean(id, sinceTick) see the change.
+            // We read currentTick without waiting for the next
+            // advanceTopology call because voxel mutation happens
+            // before tick() runs and should be observable immediately.
+            lastMutationTick.put(islandId, topology.getTracker().currentTick());
         }
     }
 
@@ -624,6 +678,7 @@ public class StructureIslandRegistry {
         topology.reset();
         fingerprintToIntId.clear();
         intIdToFingerprint.clear();
+        lastMutationTick.clear();
         LOGGER.info("[IslandRegistry] Cleared all islands");
     }
 
@@ -841,19 +896,37 @@ public class StructureIslandRegistry {
         }
 
         // Fragmented: pick one component to keep in the original island.
-        // Prefer an anchored component so the original ID stays attached
-        // to the "main" structure; otherwise keep the largest.
-        int keepIdx = 0;
-        boolean keepAnchored = partition.components().get(0).anchored();
-        int keepSize = partition.components().get(0).members().size();
-        for (int i = 1; i < partition.components().size(); i++) {
-            LabelPropagation.Component c = partition.components().get(i);
-            boolean better = (c.anchored() && !keepAnchored)
-                    || (c.anchored() == keepAnchored && c.members().size() > keepSize);
-            if (better) {
-                keepIdx = i;
-                keepAnchored = c.anchored();
-                keepSize = c.members().size();
+        // Elder Rule first — the fragment that still contains the
+        // island's birth voxel inherits the int id, so downstream
+        // systems (CollapseJournal, persistence) keep seeing the same
+        // id for the "same" structure even after repeated splits.
+        // When the birth voxel is absent (it was the voxel that just
+        // broke, or the island lost it to an earlier split), fall back
+        // to the legacy "prefer anchored, then largest" rule so we
+        // still degrade gracefully.
+        int keepIdx = -1;
+        BlockPos elder = island.birthVoxel;
+        if (elder != null) {
+            for (int i = 0; i < partition.components().size(); i++) {
+                if (partition.components().get(i).members().contains(elder)) {
+                    keepIdx = i;
+                    break;
+                }
+            }
+        }
+        if (keepIdx < 0) {
+            keepIdx = 0;
+            boolean keepAnchored = partition.components().get(0).anchored();
+            int keepSize = partition.components().get(0).members().size();
+            for (int i = 1; i < partition.components().size(); i++) {
+                LabelPropagation.Component c = partition.components().get(i);
+                boolean better = (c.anchored() && !keepAnchored)
+                        || (c.anchored() == keepAnchored && c.members().size() > keepSize);
+                if (better) {
+                    keepIdx = i;
+                    keepAnchored = c.anchored();
+                    keepSize = c.members().size();
+                }
             }
         }
 
