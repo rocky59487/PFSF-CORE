@@ -117,6 +117,20 @@ public class ServerTickHandler {
         if (server.getTickCount() % CACHE_EVICTION_INTERVAL == 0) {
             ConnectivityCache.evictStaleEntries();
         }
+
+        // ─── PNSM Phase 1 shadow-mode diff ──────────────────────────
+        // Every 20 ticks (≈ 1 s), if the shadow flag is on, reconstruct
+        // the PNSM voxel set and compare it with the legacy registry's
+        // keySet. Any disagreement is the whole point of Phase 1 — the
+        // shadow logs a rate-limited warning and the legacy path keeps
+        // running unchanged. Running at 1 Hz rather than every tick
+        // keeps the cost off the hot path for large worlds while still
+        // catching drift inside a single play session.
+        if (server.getTickCount() % 20 == 0
+                && com.blockreality.api.config.BRConfig.isPNSMShadowEnabled()) {
+            com.blockreality.api.physics.pnsm.PNSMShadow.diffAgainst(
+                    com.blockreality.api.physics.StructureIslandRegistry.snapshotRegisteredVoxels());
+        }
     }
 
     /**
