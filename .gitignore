@@ -129,6 +129,16 @@ build_log.txt
 fluid_train.err
 fluid_train.log
 
+# --- Debug / temporary dev artifacts (keep repo root clean) ---
+# dumpbin / objdump output (happens occasionally when diagnosing
+# native-library missing-import bugs — should never be committed):
+imports.txt
+**/imports.txt
+**/*_imports.txt
+# Developer scratch logs inside dev-scripts/ that should not be tracked:
+dev-scripts/**/*.log
+dev-scripts/**/out/
+
 # --- ML experiments and GUI builds ---
 ml/experiments/
 ml/BR-Trainer-GUI/build/

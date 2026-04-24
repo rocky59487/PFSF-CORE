@@ -615,6 +615,14 @@ public class StructureIslandRegistry {
     }
 
     /**
+     * Number of anchor voxels currently registered. Cheap (set size)
+     * so callable from status / HUD paths without a scan.
+     */
+    public static int getAnchorCount() {
+        return anchorBlocks.size();
+    }
+
+    /**
      * Snapshot of every currently-registered voxel. Only intended for
      * diagnostic consumers (the PNSM shadow-mode diff, /br status) —
      * each call copies the keySet into a new HashSet, so do not call

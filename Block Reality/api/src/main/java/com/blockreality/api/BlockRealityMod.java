@@ -187,6 +187,28 @@ public class BlockRealityMod {
 
     @SubscribeEvent
     public void onServerStarted(ServerStartedEvent event) {
+        // Single-line summary of the physics chain so server operators
+        // and modpack authors can see at a glance whether physics is
+        // actually going to run for this world, without digging for
+        // the individual PFSF init log lines. Matches /br status
+        // output so the in-game command reproduces what the log shows.
+        boolean physicsOn = com.blockreality.api.config.BRConfig.isPhysicsEnabled();
+        boolean pfsfOn    = com.blockreality.api.config.BRConfig.isPFSFEnabled();
+        boolean pfsfAvail = PFSFEngine.isAvailable();
+        boolean nativeOn  = com.blockreality.api.physics.pfsf.NativePFSFRuntime.isActive();
+        int shaders = com.blockreality.api.physics.pfsf.NativePFSFRuntime.getShadersRegistered();
+        boolean pnsmShadow = com.blockreality.api.config.BRConfig.isPNSMShadowEnabled();
+        LOGGER.info("[BlockReality] Physics status — physics={} pfsf_cfg={} pfsf_gpu={} native={} shaders={} pnsm_shadow={}",
+                physicsOn ? "ON" : "OFF",
+                pfsfOn ? "ON" : "OFF",
+                pfsfAvail ? "AVAILABLE" : "UNAVAILABLE",
+                nativeOn ? "ACTIVE" : "INACTIVE",
+                shaders,
+                pnsmShadow ? "ON" : "OFF");
+        if (physicsOn && pfsfOn && !pfsfAvail) {
+            LOGGER.warn("[BlockReality] PFSF is configured ON but GPU is UNAVAILABLE — physics will be silent. "
+                    + "Run /br vulkan_test or check the VulkanComputeContext init log above for details.");
+        }
     }
 
     @SubscribeEvent
