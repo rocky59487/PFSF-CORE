@@ -8,6 +8,7 @@ import com.blockreality.api.physics.ConnectivityCache;
 import com.blockreality.api.physics.StructureIslandRegistry;
 import com.blockreality.api.physics.pfsf.PFSFBufferManager;
 import com.blockreality.api.physics.pfsf.PFSFConstants;
+import com.blockreality.api.physics.pfsf.NativePFSFRuntime;
 import com.blockreality.api.physics.pfsf.PFSFEngine;
 import com.blockreality.api.physics.pfsf.PFSFFixtureWriter;
 import com.blockreality.api.physics.pfsf.PFSFIslandBuffer;
@@ -70,6 +71,11 @@ public class BrCommand {
                     boolean physicsOn = BRConfig.isPhysicsEnabled();
                     boolean pfsfOn = BRConfig.isPFSFEnabled();
                     boolean pfsfAvail = PFSFEngine.isAvailable();
+                    boolean nativeFlag = NativePFSFRuntime.isFlagEnabled();
+                    boolean nativeLoaded = NativePFSFRuntime.isLibraryLoaded();
+                    boolean nativeActive = NativePFSFRuntime.isActive();
+                    int shadersReg = NativePFSFRuntime.getShadersRegistered();
+                    int shadersMiss = NativePFSFRuntime.getShadersMissing();
                     long epoch = ConnectivityCache.getStructureEpoch();
                     String cacheStats = ConnectivityCache.getCacheStats();
 
@@ -81,6 +87,14 @@ public class BrCommand {
                         .withStyle(pfsfOn ? ChatFormatting.GREEN : ChatFormatting.GRAY), false);
                     src.sendSuccess(() -> Component.literal("  PFSF GPU: " + (pfsfAvail ? "Available" : "Unavailable"))
                         .withStyle(pfsfAvail ? ChatFormatting.GREEN : ChatFormatting.RED), false);
+                    src.sendSuccess(() -> Component.literal(
+                            "  Native: flag=" + nativeFlag + " lib=" + nativeLoaded + " active=" + nativeActive)
+                        .withStyle(nativeActive ? ChatFormatting.GREEN : ChatFormatting.RED), false);
+                    src.sendSuccess(() -> Component.literal(
+                            "  Shaders: registered=" + shadersReg + " missing=" + shadersMiss)
+                        .withStyle(shadersMiss == 0 && shadersReg > 0
+                                ? ChatFormatting.GREEN
+                                : (shadersReg == 0 ? ChatFormatting.RED : ChatFormatting.YELLOW)), false);
                     src.sendSuccess(() -> Component.literal("  Epoch: " + epoch), false);
                     src.sendSuccess(() -> Component.literal("  Cache: " + cacheStats)
                         .withStyle(ChatFormatting.GRAY), false);

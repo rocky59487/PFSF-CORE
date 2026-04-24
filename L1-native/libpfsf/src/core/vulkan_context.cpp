@@ -39,13 +39,35 @@ static bool force_load_vulkan() {
 bool VulkanContext::init() {
     if (available_) return true;
 
-    fprintf(stderr, "[libpfsf] --- VULKAN INIT: TARGETING 5070TI ---\n");
+    fprintf(stderr, "[libpfsf] --- VULKAN INIT ---\n");
 
     if (!force_load_vulkan()) return false;
 
-    // ── 三段式版本嘗試 ──
+    // ── Instance: try 1.3 → 1.2 → 1.1.
+    // On 1.1 we *try* to enable VK_KHR_get_physical_device_properties2 so
+    // vkGetPhysicalDeviceFeatures2 works as a promoted-from-KHR call, but
+    // only after verifying the driver actually exposes the extension.
+    // VulkanMod (Minecraft's reference Vulkan renderer) simply stays on
+    // 1.1 + vkGetPhysicalDeviceFeatures and skips features2 entirely; we
+    // fall back to that same conservative path when the extension is
+    // missing rather than failing vkCreateInstance.
+    bool have_properties2_ext = false;
+    {
+        uint32_t extCount = 0;
+        vkEnumerateInstanceExtensionProperties(nullptr, &extCount, nullptr);
+        std::vector<VkExtensionProperties> exts(extCount);
+        vkEnumerateInstanceExtensionProperties(nullptr, &extCount, exts.data());
+        for (auto& e : exts) {
+            if (strcmp(e.extensionName, "VK_KHR_get_physical_device_properties2") == 0) {
+                have_properties2_ext = true; break;
+            }
+        }
+    }
+
+    const char* kProperties2Ext = "VK_KHR_get_physical_device_properties2";
     uint32_t versions[] = { VK_API_VERSION_1_3, VK_API_VERSION_1_2, VK_API_VERSION_1_1 };
     VkResult last_res = VK_SUCCESS;
+    uint32_t instanceApiVersion = 0;
 
     for (uint32_t ver : versions) {
         VkApplicationInfo appInfo = {};
@@ -56,11 +78,18 @@ bool VulkanContext::init() {
         VkInstanceCreateInfo instCI = {};
         instCI.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
         instCI.pApplicationInfo = &appInfo;
-        
+        if (ver == VK_API_VERSION_1_1 && have_properties2_ext) {
+            // Promote features2 access on 1.1 driver. On 1.2+ it's core.
+            instCI.enabledExtensionCount = 1;
+            instCI.ppEnabledExtensionNames = &kProperties2Ext;
+        }
+
         last_res = vkCreateInstance(&instCI, nullptr, &instance_);
         if (last_res == VK_SUCCESS) {
-            fprintf(stderr, "[libpfsf] Instance created with API %d.%d\n", 
-                    VK_VERSION_MAJOR(ver), VK_VERSION_MINOR(ver));
+            instanceApiVersion = ver;
+            fprintf(stderr, "[libpfsf] Instance created with API %d.%d (properties2=%s)\n",
+                    VK_VERSION_MAJOR(ver), VK_VERSION_MINOR(ver),
+                    (ver >= VK_API_VERSION_1_2 || have_properties2_ext) ? "yes" : "no");
             break;
         }
     }
@@ -71,13 +100,46 @@ bool VulkanContext::init() {
     }
 
     if (!selectPhysicalDevice()) {
-        fprintf(stderr, "[libpfsf] 5070TI NOT FOUND!\n");
+        fprintf(stderr, "[libpfsf] No suitable Vulkan physical device found.\n");
         return false;
     }
 
     int qf = findComputeQueueFamily();
     if (qf < 0) return false;
     computeQueueFamily_ = (uint32_t)qf;
+
+    // features2 is only safe when instance API >= 1.2 OR properties2 ext.
+    // When neither, stay on 1.0-style vkGetPhysicalDeviceFeatures path.
+    const bool features2_available =
+        (instanceApiVersion >= VK_API_VERSION_1_2) || have_properties2_ext;
+    const bool canUse12Chain = (instanceApiVersion >= VK_API_VERSION_1_2);
+
+    VkPhysicalDeviceFeatures wanted10{};
+    VkPhysicalDeviceFeatures2 wanted2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+    VkPhysicalDeviceVulkan12Features wanted12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+
+    if (features2_available) {
+        VkPhysicalDeviceFeatures2 feats2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+        VkPhysicalDeviceVulkan12Features feats12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+        if (canUse12Chain) feats2.pNext = &feats12;
+        vkGetPhysicalDeviceFeatures2(physDevice_, &feats2);
+
+        wanted2.features.shaderInt64   = feats2.features.shaderInt64;
+        wanted2.features.shaderFloat64 = feats2.features.shaderFloat64;
+        if (canUse12Chain) {
+            wanted12.timelineSemaphore       = feats12.timelineSemaphore;
+            wanted12.storageBuffer8BitAccess = feats12.storageBuffer8BitAccess;
+            wanted12.shaderInt8              = feats12.shaderInt8;
+            wanted2.pNext = &wanted12;
+        }
+    } else {
+        // 1.1 without properties2 ext: conservative 1.0 feature query.
+        VkPhysicalDeviceFeatures have{};
+        vkGetPhysicalDeviceFeatures(physDevice_, &have);
+        wanted10.shaderInt64   = have.shaderInt64;
+        wanted10.shaderFloat64 = have.shaderFloat64;
+    }
+    timelineEnabled_ = (canUse12Chain && wanted12.timelineSemaphore == VK_TRUE);
 
     float qp = 1.0f;
     VkDeviceQueueCreateInfo qCI = {};
@@ -90,13 +152,27 @@ bool VulkanContext::init() {
     devCI.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     devCI.queueCreateInfoCount = 1;
     devCI.pQueueCreateInfos = &qCI;
-    
+    if (features2_available) {
+        devCI.pNext = &wanted2;  // features2 chain — don't set pEnabledFeatures here
+    } else {
+        devCI.pEnabledFeatures = &wanted10;
+    }
+
     if (vkCreateDevice(physDevice_, &devCI, nullptr, &device_) != VK_SUCCESS) {
         fprintf(stderr, "[libpfsf] vkCreateDevice FAILED\n");
         return false;
     }
 
     vkGetDeviceQueue(device_, computeQueueFamily_, 0, &computeQueue_);
+
+    if (features2_available) {
+        fprintf(stderr, "[libpfsf] Device features enabled: int64=%d float64=%d timelineSem=%d int8=%d storage8bit=%d\n",
+                wanted2.features.shaderInt64, wanted2.features.shaderFloat64,
+                wanted12.timelineSemaphore, wanted12.shaderInt8, wanted12.storageBuffer8BitAccess);
+    } else {
+        fprintf(stderr, "[libpfsf] Device features enabled (1.0 path): int64=%d float64=%d\n",
+                wanted10.shaderInt64, wanted10.shaderFloat64);
+    }
 
     VkCommandPoolCreateInfo cpCI = {};
     cpCI.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -108,7 +184,7 @@ bool VulkanContext::init() {
     }
 
     VmaAllocatorCreateInfo vmaCI = {};
-    vmaCI.vulkanApiVersion = VK_API_VERSION_1_1;
+    vmaCI.vulkanApiVersion = instanceApiVersion >= VK_API_VERSION_1_2 ? VK_API_VERSION_1_2 : VK_API_VERSION_1_1;
     vmaCI.physicalDevice = physDevice_;
     vmaCI.device = device_;
     vmaCI.instance = instance_;
@@ -117,21 +193,84 @@ bool VulkanContext::init() {
         return false;
     }
 
+    if (timelineEnabled_) {
+        tryCreateTimelineSemaphore();
+    }
+
     available_ = true;
-    fprintf(stderr, "[libpfsf] 🚀 5070TI SUCCESS: %s\n", deviceName_.c_str());
+    fprintf(stderr, "[libpfsf] Vulkan ready on device: %s\n", deviceName_.c_str());
+    return true;
+}
+
+bool VulkanContext::initFromExisting(VkInstance inst,
+                                     VkPhysicalDevice phys,
+                                     VkDevice dev,
+                                     uint32_t queueFamily,
+                                     VkQueue computeQueue) {
+    if (available_) return true;
+    if (inst == VK_NULL_HANDLE || phys == VK_NULL_HANDLE ||
+        dev  == VK_NULL_HANDLE || computeQueue == VK_NULL_HANDLE) {
+        fprintf(stderr, "[libpfsf] initFromExisting: null handle rejected\n");
+        return false;
+    }
+
+    instance_           = inst;
+    physDevice_         = phys;
+    device_             = dev;
+    computeQueueFamily_ = queueFamily;
+    computeQueue_       = computeQueue;
+    ownsHandles_        = false;
+
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(phys, &props);
+    deviceName_ = props.deviceName;
+
+    VkCommandPoolCreateInfo cpCI = {};
+    cpCI.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    cpCI.queueFamilyIndex = queueFamily;
+    cpCI.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    if (vkCreateCommandPool(device_, &cpCI, nullptr, &cmdPool_) != VK_SUCCESS) {
+        fprintf(stderr, "[libpfsf] initFromExisting: vkCreateCommandPool FAILED\n");
+        return false;
+    }
+
+    VmaAllocatorCreateInfo vmaCI = {};
+    vmaCI.vulkanApiVersion = VK_API_VERSION_1_2;
+    vmaCI.physicalDevice = physDevice_;
+    vmaCI.device = device_;
+    vmaCI.instance = instance_;
+    if (vmaCreateAllocator(&vmaCI, &allocator_) != VK_SUCCESS) {
+        fprintf(stderr, "[libpfsf] initFromExisting: VMA FAILED\n");
+        vkDestroyCommandPool(device_, cmdPool_, nullptr);
+        cmdPool_ = VK_NULL_HANDLE;
+        return false;
+    }
+
+    tryCreateTimelineSemaphore();
+
+    available_ = true;
+    fprintf(stderr, "[libpfsf] Vulkan adopted from Java host on device: %s\n", deviceName_.c_str());
     return true;
 }
 
 void VulkanContext::shutdown() {
     if (device_) {
         vkDeviceWaitIdle(device_);
+        if (timelineSem_ != VK_NULL_HANDLE) {
+            vkDestroySemaphore(device_, timelineSem_, nullptr);
+            timelineSem_ = VK_NULL_HANDLE;
+        }
         if (allocator_) vmaDestroyAllocator(allocator_);
         if (cmdPool_) vkDestroyCommandPool(device_, cmdPool_, nullptr);
-        vkDestroyDevice(device_, nullptr);
+        if (ownsHandles_) vkDestroyDevice(device_, nullptr);
     }
-    if (instance_) vkDestroyInstance(instance_, nullptr);
+    if (instance_ && ownsHandles_) vkDestroyInstance(instance_, nullptr);
     instance_ = VK_NULL_HANDLE; device_ = VK_NULL_HANDLE; cmdPool_ = VK_NULL_HANDLE;
+    allocator_ = nullptr;
+    timelineValue_ = 0;
+    timelineEnabled_ = false;
     available_ = false;
+    ownsHandles_ = true;
 }
 
 bool VulkanContext::selectPhysicalDevice() {
@@ -140,15 +279,55 @@ bool VulkanContext::selectPhysicalDevice() {
     if (count == 0) return false;
     std::vector<VkPhysicalDevice> devices(count);
     vkEnumeratePhysicalDevices(instance_, &count, devices.data());
-    
+
+    VkPhysicalDevice best = VK_NULL_HANDLE;
+    int bestScore = -1;
+    std::string bestName;
+
     for (auto& pd : devices) {
         VkPhysicalDeviceProperties props;
         vkGetPhysicalDeviceProperties(pd, &props);
-        if (props.vendorID == 0x10de) { 
-            physDevice_ = pd; deviceName_ = props.deviceName; return true; 
+
+        // Compute queue family must exist for this device to be usable at all.
+        uint32_t qfCount = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(pd, &qfCount, nullptr);
+        std::vector<VkQueueFamilyProperties> qfs(qfCount);
+        vkGetPhysicalDeviceQueueFamilyProperties(pd, &qfCount, qfs.data());
+        bool hasCompute = false;
+        for (uint32_t i = 0; i < qfCount; i++) {
+            if (qfs[i].queueFlags & VK_QUEUE_COMPUTE_BIT) { hasCompute = true; break; }
+        }
+        if (!hasCompute) continue;
+
+        VkPhysicalDeviceFeatures feats;
+        vkGetPhysicalDeviceFeatures(pd, &feats);
+
+        int score = 0;
+        switch (props.deviceType) {
+            case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:   score += 1000; break;
+            case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: score += 100;  break;
+            case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:    score += 50;   break;
+            default: break;
+        }
+        if (feats.shaderInt64)   score += 50;
+        if (feats.shaderFloat64) score += 25;
+        if (props.apiVersion >= VK_API_VERSION_1_2) score += 30;
+
+        if (score > bestScore) {
+            bestScore = score;
+            best = pd;
+            bestName = props.deviceName;
         }
     }
-    return false;
+
+    if (best == VK_NULL_HANDLE) {
+        fprintf(stderr, "[libpfsf] No Vulkan device with compute queue found among %u candidate(s).\n", count);
+        return false;
+    }
+    physDevice_ = best;
+    deviceName_ = bestName;
+    fprintf(stderr, "[libpfsf] Selected device: %s (score=%d)\n", deviceName_.c_str(), bestScore);
+    return true;
 }
 
 int VulkanContext::findComputeQueueFamily() {
@@ -191,19 +370,104 @@ void VulkanContext::unmapBuffer(VkBuffer b) {
 
 VkCommandBuffer VulkanContext::allocCmdBuffer() {
     VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-    ai.commandPool = cmdPool_; ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ai.commandBufferCount = 1;
-    VkCommandBuffer cb; vkAllocateCommandBuffers(device_, &ai, &cb);
+    ai.commandPool = cmdPool_;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+
+    VkCommandBuffer cb = VK_NULL_HANDLE;
+    VkResult ar = vkAllocateCommandBuffers(device_, &ai, &cb);
+    if (ar != VK_SUCCESS || cb == VK_NULL_HANDLE) {
+        fprintf(stderr, "[libpfsf] allocCmdBuffer: vkAllocateCommandBuffers failed (%d)\n", (int)ar);
+        return VK_NULL_HANDLE;
+    }
+
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(cb, &bi); return cb;
+    VkResult br = vkBeginCommandBuffer(cb, &bi);
+    if (br != VK_SUCCESS) {
+        fprintf(stderr, "[libpfsf] allocCmdBuffer: vkBeginCommandBuffer failed (%d)\n", (int)br);
+        vkFreeCommandBuffers(device_, cmdPool_, 1, &cb);
+        return VK_NULL_HANDLE;
+    }
+    return cb;
+}
+
+void VulkanContext::tryCreateTimelineSemaphore() {
+    if (timelineSem_ != VK_NULL_HANDLE) return;
+    // In the owned-init path we only call this when timelineEnabled_ was
+    // set true during feature negotiation. In initFromExisting we don't
+    // know whether the Java host enabled the feature; we still attempt
+    // and fall back on VK_ERROR_FEATURE_NOT_PRESENT rather than guessing.
+    VkSemaphoreTypeCreateInfo stci = {};
+    stci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+    stci.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    stci.initialValue = 0;
+    VkSemaphoreCreateInfo sci = {};
+    sci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    sci.pNext = &stci;
+    VkSemaphore sem = VK_NULL_HANDLE;
+    VkResult r = vkCreateSemaphore(device_, &sci, nullptr, &sem);
+    if (r == VK_SUCCESS) {
+        timelineSem_ = sem;
+        timelineValue_ = 0;
+        fprintf(stderr, "[libpfsf] Timeline semaphore enabled for async submits.\n");
+    } else {
+        // Feature unavailable (or validation layer complaint) — stay on
+        // vkQueueWaitIdle path in submitAndWait. Not fatal.
+        timelineSem_ = VK_NULL_HANDLE;
+        fprintf(stderr, "[libpfsf] Timeline semaphore unavailable (vkResult=%d); using vkQueueWaitIdle fallback.\n",
+                (int)r);
+    }
 }
 
 VkResult VulkanContext::submitAndWait(VkCommandBuffer cb) {
-    vkEndCommandBuffer(cb);
-    VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO}; si.commandBufferCount = 1; si.pCommandBuffers = &cb;
-    vkQueueSubmit(computeQueue_, 1, &si, VK_NULL_HANDLE);
-    VkResult res = vkQueueWaitIdle(computeQueue_);
-    vkFreeCommandBuffers(device_, cmdPool_, 1, &cb); return res;
+    // allocCmdBuffer returns VK_NULL_HANDLE on failure; refuse to submit
+    // a null handle rather than hand Vulkan an invalid cmdbuf.
+    if (cb == VK_NULL_HANDLE) return VK_ERROR_INITIALIZATION_FAILED;
+
+    VkResult endR = vkEndCommandBuffer(cb);
+    if (endR != VK_SUCCESS) {
+        vkFreeCommandBuffers(device_, cmdPool_, 1, &cb);
+        return endR;
+    }
+
+    VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cb;
+
+    VkResult res;
+    if (timelineSem_ != VK_NULL_HANDLE) {
+        // Timeline path: wait only on THIS submit, not the entire queue.
+        uint64_t signalValue = ++timelineValue_;
+        VkTimelineSemaphoreSubmitInfo tssi = {};
+        tssi.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        tssi.signalSemaphoreValueCount = 1;
+        tssi.pSignalSemaphoreValues = &signalValue;
+
+        si.pNext = &tssi;
+        si.signalSemaphoreCount = 1;
+        si.pSignalSemaphores = &timelineSem_;
+
+        if (vkQueueSubmit(computeQueue_, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS) {
+            vkFreeCommandBuffers(device_, cmdPool_, 1, &cb);
+            return VK_ERROR_DEVICE_LOST;
+        }
+
+        VkSemaphoreWaitInfo wi = {};
+        wi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+        wi.semaphoreCount = 1;
+        wi.pSemaphores = &timelineSem_;
+        wi.pValues = &signalValue;
+        // 5-second timeout is generous for a compute dispatch; treat
+        // timeout as DEVICE_LOST so callers can reset rather than hang.
+        res = vkWaitSemaphores(device_, &wi, 5'000'000'000ULL);
+    } else {
+        vkQueueSubmit(computeQueue_, 1, &si, VK_NULL_HANDLE);
+        res = vkQueueWaitIdle(computeQueue_);
+    }
+
+    vkFreeCommandBuffers(device_, cmdPool_, 1, &cb);
+    return res;
 }
 
 VkShaderModule VulkanContext::createShaderModule(const uint32_t* p, size_t s) {

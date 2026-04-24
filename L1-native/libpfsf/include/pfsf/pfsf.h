@@ -43,6 +43,33 @@ extern "C" {
 PFSF_API pfsf_engine pfsf_create(const pfsf_config* config);
 
 /**
+ * Borrowed Vulkan handles from a host application (e.g. the Java side
+ * of Block Reality). When supplied via pfsf_create_with_vulkan, the
+ * engine skips vkCreateInstance / vkCreateDevice and adopts these
+ * handles for its GPU work, so Java and C++ share one VkDevice and
+ * can hand buffers across the boundary.
+ *
+ * All handles are jlong-wide opaque pointers; callers cast from the
+ * matching Vulkan handle type. The host retains ownership — the
+ * engine will NOT destroy them on pfsf_destroy.
+ */
+typedef struct pfsf_vulkan_handles {
+    uint64_t vk_instance;
+    uint64_t vk_physical_device;
+    uint64_t vk_device;
+    uint32_t compute_queue_family;
+    uint64_t vk_compute_queue;
+} pfsf_vulkan_handles;
+
+/**
+ * Create an engine that will adopt Vulkan handles instead of creating
+ * its own. Pass NULL for @p config to accept defaults. @p handles must
+ * be non-NULL; every handle field must be valid or the call returns NULL.
+ */
+PFSF_API pfsf_engine pfsf_create_with_vulkan(const pfsf_config* config,
+                                              const pfsf_vulkan_handles* handles);
+
+/**
  * Initialize Vulkan compute context and shader pipelines.
  * Must be called once after pfsf_create().
  *

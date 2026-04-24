@@ -25,6 +25,7 @@ namespace pfsf {
 class PFSFEngine {
 public:
     explicit PFSFEngine(const pfsf_config& config);
+    PFSFEngine(const pfsf_config& config, const pfsf_vulkan_handles& handles);
     ~PFSFEngine();
 
     PFSFEngine(const PFSFEngine&) = delete;
@@ -98,6 +99,9 @@ private:
 
     pfsf_config config_;
     bool        available_ = false;
+
+    bool                hasExternalVk_ = false;
+    pfsf_vulkan_handles externalVk_{};
 
     // ── Vulkan ──
     std::unique_ptr<VulkanContext>   vk_;

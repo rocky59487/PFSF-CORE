@@ -143,4 +143,88 @@ class PFSFDataBuilderTest {
             }
         }
     }
+
+    // ─── Sigma normalisation invariants ─────────────────────────────
+    // CLAUDE.md "正規化約定" marks this path as "極重要": source,
+    // rcomp, rtens and conductivity are all divided by sigmaMax before
+    // upload so failure_scan's flux/threshold comparison stays in the
+    // right magnitude. Without these invariants a regression silently
+    // produces spurious collapses in high-stiffness structures.
+
+    @Test
+    @DisplayName("sigma norm: sigmaMax < 1 → no division applied")
+    void testNormalizeSkippedBelowThreshold() {
+        int N = 4;
+        float[] source = {1.0f, 2.0f, 3.0f, 4.0f};
+        float[] rcomp  = {10.0f, 20.0f, 30.0f, 40.0f};
+        float[] rtens  = {5.0f, 6.0f, 7.0f, 8.0f};
+        float[] cond   = new float[6 * N];
+        for (int i = 0; i < cond.length; i++) cond[i] = 0.5f; // all < 1
+
+        float sigmaMax = PFSFDataBuilder.normalizeSoA6JavaRef(source, rcomp, rtens, cond, N);
+
+        assertEquals(1.0f, sigmaMax, 1e-6f,
+                "sigmaMax must be 1.0f when every conductivity is below 1 (no normalisation)");
+        assertArrayEquals(new float[]{1.0f, 2.0f, 3.0f, 4.0f}, source, 1e-6f);
+        assertArrayEquals(new float[]{10.0f, 20.0f, 30.0f, 40.0f}, rcomp, 1e-6f);
+        assertArrayEquals(new float[]{5.0f, 6.0f, 7.0f, 8.0f}, rtens, 1e-6f);
+    }
+
+    @Test
+    @DisplayName("sigma norm: source/rcomp/rtens/conductivity all scaled by 1/sigmaMax")
+    void testNormalizeAllBuffersScaledTogether() {
+        int N = 3;
+        float[] source = {100.0f, 200.0f, 300.0f};
+        float[] rcomp  = {50.0f, 60.0f, 70.0f};
+        float[] rtens  = {10.0f, 20.0f, 30.0f};
+        float[] cond   = new float[6 * N];
+        // Seed conductivity so sigmaMax = 40.0f
+        cond[0] = 1.0f; cond[1] = 5.0f; cond[2] = 40.0f;
+        for (int i = 3; i < cond.length; i++) cond[i] = 2.0f;
+
+        float sigmaMax = PFSFDataBuilder.normalizeSoA6JavaRef(source, rcomp, rtens, cond, N);
+
+        assertEquals(40.0f, sigmaMax, 1e-5f, "sigmaMax == max(conductivity)");
+        float inv = 1.0f / 40.0f;
+        assertArrayEquals(new float[]{100.0f * inv, 200.0f * inv, 300.0f * inv}, source, 1e-5f);
+        assertArrayEquals(new float[]{50.0f * inv, 60.0f * inv, 70.0f * inv}, rcomp, 1e-5f,
+                "rcomp MUST be divided by sigmaMax — see CLAUDE.md 正規化約定 + D1-fix");
+        assertArrayEquals(new float[]{10.0f * inv, 20.0f * inv, 30.0f * inv}, rtens, 1e-5f,
+                "rtens MUST be divided by sigmaMax — same invariant as rcomp");
+        assertEquals(1.0f / 40.0f * 40.0f, cond[2], 1e-5f, "conductivity max must normalise to 1");
+        assertTrue(cond[2] <= 1.0f + 1e-5f, "every normalised conductivity must be <= 1");
+    }
+
+    @Test
+    @DisplayName("sigma norm: ratio source/rcomp preserved — failure_scan compares identical magnitudes")
+    void testRatioPreservedAcrossNormalisation() {
+        int N = 2;
+        float[] source = {15.0f, 25.0f};
+        float[] rcomp  = {30.0f, 50.0f};
+        float[] rtens  = {20.0f, 40.0f};
+        float[] cond   = new float[6 * N];
+        cond[0] = 100.0f; // force sigmaMax = 100
+
+        float[] srcOrig = source.clone();
+        float[] rcompOrig = rcomp.clone();
+        float[] rtensOrig = rtens.clone();
+
+        PFSFDataBuilder.normalizeSoA6JavaRef(source, rcomp, rtens, cond, N);
+
+        // The physical invariant: any ratio that was meaningful in the
+        // original units must remain identical post-normalisation,
+        // because flux/rcomp and flux/rtens are the actual failure
+        // predicates and both sides get the same 1/sigmaMax factor.
+        for (int i = 0; i < N; i++) {
+            float originalRatio = srcOrig[i] / rcompOrig[i];
+            float normalisedRatio = source[i] / rcomp[i];
+            assertEquals(originalRatio, normalisedRatio, 1e-5f,
+                    "source/rcomp ratio must be invariant across sigma normalisation (voxel " + i + ")");
+
+            float originalTRatio = srcOrig[i] / rtensOrig[i];
+            float normalisedTRatio = source[i] / rtens[i];
+            assertEquals(originalTRatio, normalisedTRatio, 1e-5f,
+                    "source/rtens ratio must be invariant across sigma normalisation (voxel " + i + ")");
+        }
+    }
 }

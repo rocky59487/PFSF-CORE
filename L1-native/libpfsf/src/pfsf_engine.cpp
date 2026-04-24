@@ -24,6 +24,10 @@ static_assert(sizeof(pfsf_failure_event) == 16,
 PFSFEngine::PFSFEngine(const pfsf_config& config)
     : config_(config) {}
 
+PFSFEngine::PFSFEngine(const pfsf_config& config,
+                       const pfsf_vulkan_handles& handles)
+    : config_(config), hasExternalVk_(true), externalVk_(handles) {}
+
 PFSFEngine::~PFSFEngine() {
     shutdown();
 }
@@ -34,7 +38,18 @@ pfsf_result PFSFEngine::init() {
     if (available_) return PFSF_OK;
 
     vk_ = std::make_unique<VulkanContext>();
-    if (!vk_->init()) {
+    bool vkOk;
+    if (hasExternalVk_) {
+        vkOk = vk_->initFromExisting(
+            reinterpret_cast<VkInstance>(externalVk_.vk_instance),
+            reinterpret_cast<VkPhysicalDevice>(externalVk_.vk_physical_device),
+            reinterpret_cast<VkDevice>(externalVk_.vk_device),
+            externalVk_.compute_queue_family,
+            reinterpret_cast<VkQueue>(externalVk_.vk_compute_queue));
+    } else {
+        vkOk = vk_->init();
+    }
+    if (!vkOk) {
         vk_.reset();
         return PFSF_ERROR_NO_DEVICE;
     }

@@ -24,6 +24,14 @@ public:
     VulkanContext& operator=(const VulkanContext&) = delete;
 
     bool init();
+    /// Adopt Vulkan handles owned by another module (typically the Java
+    /// host). This context will NOT destroy them on shutdown; only the
+    /// VMA allocator + cmdPool it creates here are torn down.
+    bool initFromExisting(VkInstance inst,
+                          VkPhysicalDevice phys,
+                          VkDevice dev,
+                          uint32_t queueFamily,
+                          VkQueue computeQueue);
     void shutdown();
 
     bool isAvailable() const { return available_; }
@@ -70,6 +78,24 @@ private:
 
     VmaAllocator     allocator_      = nullptr;
     std::unordered_map<VkBuffer, VmaAllocation> allocationMap_;
+
+    /// True when this context created the instance/device and should
+    /// destroy them on shutdown. False when adopted via initFromExisting.
+    bool             ownsHandles_    = true;
+
+    /// Timeline semaphore used to serialise submits without stalling
+    /// unrelated work queued on the same VkQueue. VK_NULL_HANDLE when
+    /// unavailable; submitAndWait falls back to vkQueueWaitIdle.
+    VkSemaphore      timelineSem_    = VK_NULL_HANDLE;
+    uint64_t         timelineValue_  = 0;
+    /// True when we know the device has timelineSemaphore enabled.
+    /// In the owned-init path this is set after feature negotiation.
+    /// In initFromExisting we don't know for sure (Java host may or may
+    /// not have enabled it), so we optimistically try and fall back
+    /// gracefully when vkCreateSemaphore returns VK_ERROR_FEATURE_NOT_PRESENT.
+    bool             timelineEnabled_ = false;
+
+    void tryCreateTimelineSemaphore();
 };
 
 } // namespace pfsf

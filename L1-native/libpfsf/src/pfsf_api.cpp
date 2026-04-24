@@ -20,19 +20,31 @@ static inline PFSFEngine* E(pfsf_engine h) {
 
 /* ═══ Lifecycle ═══ */
 
-pfsf_engine pfsf_create(const pfsf_config* config) {
+static pfsf_config default_config() {
     pfsf_config cfg{};
-    if (config) {
-        cfg = *config;
-    } else {
-        cfg.max_island_size    = 50000;
-        cfg.tick_budget_ms     = 8;
-        cfg.vram_budget_bytes  = 512LL * 1024 * 1024;
-        cfg.enable_phase_field = true;
-        cfg.enable_multigrid   = true;
-    }
+    cfg.max_island_size    = 50000;
+    cfg.tick_budget_ms     = 8;
+    cfg.vram_budget_bytes  = 512LL * 1024 * 1024;
+    cfg.enable_phase_field = true;
+    cfg.enable_multigrid   = true;
+    return cfg;
+}
 
+pfsf_engine pfsf_create(const pfsf_config* config) {
+    pfsf_config cfg = config ? *config : default_config();
     auto* engine = new (std::nothrow) PFSFEngine(cfg);
+    return reinterpret_cast<pfsf_engine>(engine);
+}
+
+pfsf_engine pfsf_create_with_vulkan(const pfsf_config* config,
+                                     const pfsf_vulkan_handles* handles) {
+    if (!handles) return nullptr;
+    if (handles->vk_instance == 0 || handles->vk_physical_device == 0 ||
+        handles->vk_device == 0   || handles->vk_compute_queue == 0) {
+        return nullptr;
+    }
+    pfsf_config cfg = config ? *config : default_config();
+    auto* engine = new (std::nothrow) PFSFEngine(cfg, *handles);
     return reinterpret_cast<pfsf_engine>(engine);
 }
 

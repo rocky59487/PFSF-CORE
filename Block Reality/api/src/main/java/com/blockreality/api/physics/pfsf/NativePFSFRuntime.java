@@ -27,14 +27,26 @@ public final class NativePFSFRuntime {
     private static final Logger LOGGER = LoggerFactory.getLogger("PFSF-NativeRT");
 
     public static final String ACTIVATION_PROPERTY = "blockreality.native.pfsf";
+    public static final String DISABLE_PROPERTY    = "blockreality.native.pfsf.disable";
 
     private static final boolean KERNELS_PORTED = true;
 
-    private static final boolean       FLAG_ENABLED   = Boolean.getBoolean(ACTIVATION_PROPERTY);
+    // Default-on: users should not need to set a JVM flag for physics to work.
+    // Explicit -Dblockreality.native.pfsf=false or -Dblockreality.native.pfsf.disable=true still disables.
+    private static final boolean FLAG_ENABLED = resolveFlagEnabled();
     private static final AtomicBoolean INIT_ATTEMPTED = new AtomicBoolean(false);
+
+    private static boolean resolveFlagEnabled() {
+        if (Boolean.getBoolean(DISABLE_PROPERTY)) return false;
+        String explicit = System.getProperty(ACTIVATION_PROPERTY);
+        if (explicit != null) return Boolean.parseBoolean(explicit);
+        return true;
+    }
 
     private static volatile long    handle = 0L;
     private static volatile boolean active = false;
+    private static volatile int     shadersRegistered = 0;
+    private static volatile int     shadersMissing    = 0;
 
     private static final RuntimeView VIEW = new RuntimeView();
 
@@ -46,10 +58,12 @@ public final class NativePFSFRuntime {
     public static boolean isFlagEnabled()   { return FLAG_ENABLED; }
     public static boolean isLibraryLoaded() { return NativePFSFBridge.isAvailable(); }
     public static boolean areKernelsPorted(){ return KERNELS_PORTED; }
+    public static int     getShadersRegistered() { return shadersRegistered; }
+    public static int     getShadersMissing()    { return shadersMissing; }
 
     public static IPFSFRuntime asRuntime() { return VIEW; }
 
-    private static void registerRequiredShaders() {
+    private static boolean registerRequiredShaders() {
         String[] shaders = {
             "pfsf/jacobi_smooth.comp",
             "pfsf/rbgs_smooth.comp",
@@ -63,40 +77,62 @@ public final class NativePFSFRuntime {
             "pfsf/sparse_scatter.comp"
         };
 
+        int registered = 0, missing = 0;
         for (String s : shaders) {
-            try {
-                // 尋找由 precompileShaders 產生的 .spv 文件
-                String resourcePath = "/assets/blockreality/shaders/compute/" + s + ".spv";
-                java.io.InputStream in = NativePFSFRuntime.class.getResourceAsStream(resourcePath);
-                if (in != null) {
-                    byte[] bytes = in.readAllBytes();
-                    java.nio.ByteBuffer dbb = java.nio.ByteBuffer.allocateDirect(bytes.length);
-                    dbb.put(bytes);
-                    // 不需要 flip，allocateDirect 已經準備好
-                    String canonicalName = "compute/" + s;
-                    NativePFSFBridge.nativeRegisterShader(canonicalName, dbb);
+            String resourcePath = "/assets/blockreality/shaders/compute/" + s + ".spv";
+            try (java.io.InputStream in = NativePFSFRuntime.class.getResourceAsStream(resourcePath)) {
+                if (in == null) {
+                    missing++;
+                    LOGGER.error("Shader missing from jar: {} (run :api:precompileShaders?)", resourcePath);
+                    continue;
                 }
+                byte[] bytes = in.readAllBytes();
+                java.nio.ByteBuffer dbb = java.nio.ByteBuffer.allocateDirect(bytes.length);
+                dbb.put(bytes);
+                // Native side reads via GetDirectBufferAddress + GetDirectBufferCapacity
+                // (both position-independent), so flip() is not strictly required.
+                // Call it anyway so the buffer round-trips cleanly if a future
+                // position-aware reader is introduced on either side.
+                dbb.flip();
+                String canonicalName = "compute/" + s;
+                NativePFSFBridge.nativeRegisterShader(canonicalName, dbb);
+                registered++;
             } catch (Exception e) {
+                missing++;
                 LOGGER.error("Failed to register shader: {}", s, e);
             }
         }
+        shadersRegistered = registered;
+        shadersMissing    = missing;
+        if (registered == 0) {
+            LOGGER.error("No PFSF shaders registered; physics will not function. Expected {} shaders.", shaders.length);
+            return false;
+        }
+        if (missing > 0) {
+            LOGGER.warn("PFSF shader registration incomplete: registered={}, missing={}", registered, missing);
+        } else {
+            LOGGER.info("PFSF shaders registered: {}/{}", registered, shaders.length);
+        }
+        return true;
     }
 
     public static synchronized void init() {
         if (!INIT_ATTEMPTED.compareAndSet(false, true)) return;
 
         if (!FLAG_ENABLED) {
-            LOGGER.debug("Native PFSF runtime disabled: -D{} is not set.", ACTIVATION_PROPERTY);
+            LOGGER.info("Native PFSF runtime disabled via -D{}=false or -D{}=true.",
+                    ACTIVATION_PROPERTY, DISABLE_PROPERTY);
             return;
         }
         if (!NativePFSFBridge.isAvailable()) {
-            LOGGER.warn("Native PFSF runtime requested (-D{}=true) but libblockreality_pfsf was not loaded.", ACTIVATION_PROPERTY);
+            LOGGER.warn("Native PFSF runtime enabled but libblockreality_pfsf was not loaded; physics will not run.");
             return;
         }
+        LOGGER.info("Native PFSF runtime enabling (KERNELS_PORTED={})", KERNELS_PORTED);
 
-        // ── 核心修復：手動註冊 Shader ──
-        // 這是因為 L1-native 不再包含嵌入的 Shader，我們必須從 Java 端資源手動注入。
-        registerRequiredShaders();
+        if (!registerRequiredShaders()) {
+            return;
+        }
 
         long h = 0L;
         try {
@@ -108,7 +144,30 @@ public final class NativePFSFRuntime {
                 pcgEnabled = BRConfig.isPFSFPCGEnabled();
             } catch (Throwable ignored) {}
 
-            h = NativePFSFBridge.nativeCreate(50_000, Math.max(1, budget), 512L * 1024 * 1024, true, true);
+            long vkInst  = VulkanComputeContext.getVkInstanceHandle();
+            long vkPhys  = VulkanComputeContext.getVkPhysicalDeviceHandle();
+            long vkDev   = VulkanComputeContext.getVkDeviceHandle();
+            long vkQueue = VulkanComputeContext.getVkComputeQueueHandle();
+            int  vkQf    = VulkanComputeContext.getComputeQueueFamily();
+            boolean shareVk = VulkanComputeContext.isComputeSupported()
+                    && vkInst != 0L && vkPhys != 0L && vkDev != 0L && vkQueue != 0L && vkQf >= 0;
+
+            if (shareVk) {
+                try {
+                    h = NativePFSFBridge.nativeCreateWithVulkan(
+                            50_000, Math.max(1, budget), 512L * 1024 * 1024,
+                            true, true,
+                            vkInst, vkPhys, vkDev, vkQf, vkQueue);
+                    LOGGER.info("Native PFSF sharing Vulkan instance/device with Java host.");
+                } catch (UnsatisfiedLinkError missing) {
+                    // Older native binary without the shared-handle entrypoint.
+                    LOGGER.warn("nativeCreateWithVulkan not present in native lib; falling back to standalone.");
+                    h = 0L;
+                }
+            }
+            if (h == 0L) {
+                h = NativePFSFBridge.nativeCreate(50_000, Math.max(1, budget), 512L * 1024 * 1024, true, true);
+            }
             if (h == 0L) return;
 
             int rc = NativePFSFBridge.nativeInit(h);
