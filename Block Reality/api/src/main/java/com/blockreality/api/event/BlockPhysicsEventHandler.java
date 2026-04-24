@@ -8,6 +8,7 @@ import com.blockreality.api.config.BRConfig;
 import com.blockreality.api.material.DefaultMaterial;
 import com.blockreality.api.material.RMaterial;
 import com.blockreality.api.material.VanillaMaterialMap;
+import com.blockreality.api.physics.AnchorContinuityChecker;
 import com.blockreality.api.physics.ConnectivityCache;
 import com.blockreality.api.physics.RCFusionDetector;
 import com.blockreality.api.physics.StructureIslandRegistry;
@@ -55,7 +56,18 @@ public class BlockPhysicsEventHandler {
 
         final BlockPos pos = event.getPos().immutable();
 
-        // ★ Phase 1: 登錄到 Island Registry（同步）
+        // ★ Phase 1a: 天然錨點預判 — 必須在 registerBlock 之前，
+        // 否則 StructureIslandRegistry.registerBlock 在分類 voxel 類型時
+        // 會把實際上該錨定的方塊當成一般體素（見 registerBlock 第 408 行的
+        // anchorBlocks.contains(pos) 檢查）。這裡同時是從 test-only 的
+        // registerAnchor 路徑接到生產端的唯一觸發點 — 一旦 anchorBlocks
+        // 有內容，advanceTopology 的 safety-valve 就放行，
+        // ThreeTierOrchestrator 才會真的輸出 orphan events。
+        if (AnchorContinuityChecker.isNaturalAnchor(level, pos)) {
+            StructureIslandRegistry.registerAnchor(pos);
+        }
+
+        // ★ Phase 1b: 登錄到 Island Registry（同步）
         long epoch = ConnectivityCache.getStructureEpoch();
         int islandId = StructureIslandRegistry.registerBlock(pos, epoch);
 
@@ -67,6 +79,8 @@ public class BlockPhysicsEventHandler {
             BlockState placedState = level.getBlockState(pos);
             if (!(placedState.getBlock() instanceof RBlock)) {
                 StructureIslandRegistry.unregisterBlock(level, pos, epoch);
+                // 同步 rollback 錨點登錄，避免 anchorBlocks 殘留 ghost 條目。
+                StructureIslandRegistry.unregisterAnchor(pos);
                 LOGGER.debug("[BR-Events] Block placement at {} was cancelled, rolled back island registration", pos);
                 return;
             }
@@ -115,6 +129,10 @@ public class BlockPhysicsEventHandler {
 
             // 從 Island Registry 註銷，取回所有分裂後的 island ID
             java.util.List<Integer> resultIds = StructureIslandRegistry.unregisterBlock(level, pos, epoch);
+            // 同步清除錨點登錄 — 方塊已經破壞，若曾經是天然錨點就一併移除。
+            // 呼叫 unregisterAnchor 是 idempotent 的（內部 set.remove）所以
+            // 即使該位置從來不是錨點也安全。
+            StructureIslandRegistry.unregisterAnchor(pos);
 
             // ★ Fix 1: 通知 PFSF 所有分裂後的 island（原 island + 新 island），
             // 觸發每個 island 的 sparse full-rebuild，確保 GPU buffer 同步正確拓撲。
