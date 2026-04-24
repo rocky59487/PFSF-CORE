@@ -10,6 +10,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraftforge.event.level.ChunkEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
@@ -44,6 +45,7 @@ public class ChunkEventHandler {
     @SubscribeEvent
     public static void onChunkLoad(ChunkEvent.Load event) {
         if (!(event.getLevel() instanceof ServerLevel level)) return;
+        if (!(event.getChunk() instanceof LevelChunk levelChunk)) return;
 
         long epoch = ConnectivityCache.getStructureEpoch();
         int registered = 0;
@@ -53,7 +55,7 @@ public class ChunkEventHandler {
         // concurrent-mod issues if something else touches the chunk
         // mid-iteration.
         java.util.Map<BlockPos, BlockEntity> entities =
-                new java.util.HashMap<>(event.getChunk().getBlockEntities());
+                new java.util.HashMap<>(levelChunk.getBlockEntities());
 
         for (java.util.Map.Entry<BlockPos, BlockEntity> e : entities.entrySet()) {
             if (!(e.getValue() instanceof RBlockEntity)) continue;
