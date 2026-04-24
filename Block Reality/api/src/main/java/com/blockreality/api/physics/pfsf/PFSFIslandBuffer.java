@@ -83,6 +83,7 @@ public class PFSFIslandBuffer {
     private boolean dirty = true;
     private boolean allocated = false;
     private boolean coarseOnly = false;
+    private boolean hostOnly = false;
 
     int chebyshevIter = 0;
     float rhoSpecOverride;
@@ -162,6 +163,7 @@ public class PFSFIslandBuffer {
         this.Ly = Ly;
         this.Lz = Lz;
         this.origin = origin;
+        this.hostOnly = NativePFSFRuntime.isActive() && !VulkanComputeContext.isComputeSupported();
 
         int N = getN();
         long floatN = (long) N * Float.BYTES;
@@ -206,15 +208,24 @@ public class PFSFIslandBuffer {
         java.nio.FloatBuffer curingFB = lookupCuring.asFloatBuffer();
         for (int i = 0; i < N; i++) curingFB.put(i, 1.0f);
 
+        phiOffset = phiAOffset;
+        phiPrevOffset = phiBOffset;
+
+        if (hostOnly) {
+            convergence = new PFSFConvergenceState(getLmax());
+            rhoSpecOverride = convergence.getRhoSpecOverride();
+            allocated = true;
+            LOGGER.info("[PFSF] Island {} allocated in host-only mode for native runtime ({}x{}x{})",
+                    islandId, Lx, Ly, Lz);
+            return;
+        }
+
         coalescedBuf = VulkanComputeContext.allocateDeviceBuffer(coalescedSize, storageUsage);
         if (coalescedBuf == null) {
             LOGGER.error("[PFSF] Island {} coalesced buffer allocation failed", islandId);
             allocated = false;
             return;
         }
-
-        phiOffset = phiAOffset;
-        phiPrevOffset = phiBOffset;
 
         phaseField.allocate(N);
         stagingSize = float6N;
@@ -233,10 +244,13 @@ public class PFSFIslandBuffer {
         }
     }
 
-    public void allocateMultigrid() { multigrid.allocate(Lx, Ly, Lz); }
+    public void allocateMultigrid() {
+        if (hostOnly || !VulkanComputeContext.isComputeSupported()) return;
+        multigrid.allocate(Lx, Ly, Lz);
+    }
 
     public void allocatePCG() {
-        if (pcgAllocated || !allocated) return;
+        if (hostOnly || !VulkanComputeContext.isComputeSupported() || pcgAllocated || !allocated) return;
         int N = getN();
         long floatN = (long) N * Float.BYTES;
         int storageUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -269,7 +283,7 @@ public class PFSFIslandBuffer {
      * island is a no-op.
      */
     public void allocateLabelProp() {
-        if (labelPropAllocated || !allocated) return;
+        if (hostOnly || !VulkanComputeContext.isComputeSupported() || labelPropAllocated || !allocated) return;
         int N = getN();
         int maxComponents = PFSFLabelPropCpuSimulator.MAX_COMPONENTS;
         int storageUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
@@ -349,6 +363,7 @@ public class PFSFIslandBuffer {
         freePCG();
         phaseField.free();
         multigrid.free();
+        hostOnly = false;
         allocated = false;
     }
 
@@ -681,7 +696,7 @@ public class PFSFIslandBuffer {
     public ByteBuffer getMaxPhiBufAsBB()       { return wrapStaging(maxPhiOffset, getPhiSize()); }
 
     public void ensureVectorFieldAllocated() {
-        if (vectorFieldAllocated) return;
+        if (hostOnly || !VulkanComputeContext.isComputeSupported() || vectorFieldAllocated) return;
         long size = (long) getN() * 3 * Float.BYTES;
         vectorFieldBuf = VulkanComputeContext.allocateDeviceBuffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
         if (vectorFieldBuf != null) vectorFieldAllocated = true;
@@ -703,7 +718,7 @@ public class PFSFIslandBuffer {
     }
 
     private static long alignToDevice(long offset) {
-        long alignment = VulkanComputeContext.getMinBufferAlignment();
+        long alignment = Math.max(1L, VulkanComputeContext.getMinBufferAlignment());
         return (offset + (alignment - 1)) & ~(alignment - 1);
     }
 

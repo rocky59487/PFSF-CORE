@@ -1,29 +1,80 @@
 package com.blockreality.api.physics.pfsf;
 
+import net.minecraft.core.BlockPos;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-import static org.junit.jupiter.api.Assertions.*;
+import java.lang.reflect.Field;
 
-/**
- * PFSFEngine integrates logic testing (no GPU required).
- *
- * <p>Verify engine state machine, module delegation, public API behavior. </p>
- */
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
 class PFSFEngineIntegrationTest {
 
     @Test
-    @DisplayName("引擎未初始化時 isAvailable = false")
+    @DisplayName("uninitialized engine reports unavailable")
     void testUninitializedEngine() {
-        // PFSFEngine is static and its initial state depends on VulkanComputeContext
-        // In a GPUless environment, isAvailable() should be false
-        // (Because VulkanComputeContext.isAvailable() will return false)
         assertFalse(PFSFEngine.isAvailable(),
                 "Engine should not be available without Vulkan context");
     }
 
     @Test
-    @DisplayName("getStats 無 GPU 時回傳 DISABLED")
+    @DisplayName("native runtime counts as available")
+    void testNativeRuntimeCountsAsAvailable() throws Exception {
+        Field instanceField = PFSFEngine.class.getDeclaredField("instance");
+        instanceField.setAccessible(true);
+        Object previousInstance = instanceField.get(null);
+
+        Field nativeActiveField = NativePFSFRuntime.class.getDeclaredField("active");
+        nativeActiveField.setAccessible(true);
+        boolean previousNativeActive = nativeActiveField.getBoolean(null);
+
+        try {
+            instanceField.set(null, new PFSFEngineInstance());
+            nativeActiveField.setBoolean(null, true);
+
+            assertTrue(PFSFEngine.isAvailable(),
+                    "Active native runtime must count as GPU availability");
+            assertSame(NativePFSFRuntime.asRuntime(), PFSFEngine.getRuntime(),
+                    "Native runtime should be selected when it is active");
+        } finally {
+            nativeActiveField.setBoolean(null, previousNativeActive);
+            instanceField.set(null, previousInstance);
+        }
+    }
+
+    @Test
+    @DisplayName("native-only mode allocates host-backed island buffers")
+    void testNativeOnlyIslandBufferAllocation() throws Exception {
+        Field nativeActiveField = NativePFSFRuntime.class.getDeclaredField("active");
+        nativeActiveField.setAccessible(true);
+        boolean previousNativeActive = nativeActiveField.getBoolean(null);
+
+        try {
+            nativeActiveField.setBoolean(null, true);
+
+            PFSFIslandBuffer buf = new PFSFIslandBuffer(77);
+            buf.allocate(4, 4, 4, BlockPos.ZERO);
+
+            assertTrue(buf.isAllocated(), "Native-only mode should still allocate host-side buffers");
+            assertEqualsZero(buf.getPhiBuf(), "Host-only native allocation must not depend on Java Vulkan buffers");
+            assertNotNull(buf.getPhiBufAsBB(), "Native runtime still needs host DBBs for phi");
+            assertNotNull(buf.getSourceBufAsBB(), "Native runtime still needs host DBBs for source");
+            assertNotNull(buf.getLookupCuringBB(), "Native runtime still needs lookup DBBs");
+            assertFalse(buf.getPhaseField().isAllocated(), "Java phase-field GPU buffers must stay disabled in host-only mode");
+
+            buf.release();
+        } finally {
+            nativeActiveField.setBoolean(null, previousNativeActive);
+        }
+    }
+
+    @Test
+    @DisplayName("getStats returns disabled when engine is off")
     void testGetStatsDisabled() {
         String stats = PFSFEngine.getStats();
         assertNotNull(stats);
@@ -32,9 +83,8 @@ class PFSFEngineIntegrationTest {
     }
 
     @Test
-    @DisplayName("shutdown 可安全重複呼叫")
+    @DisplayName("shutdown is idempotent")
     void testShutdownIdempotent() {
-        // Should not throw even if called multiple times without init
         assertDoesNotThrow(() -> {
             PFSFEngine.shutdown();
             PFSFEngine.shutdown();
@@ -42,40 +92,28 @@ class PFSFEngineIntegrationTest {
     }
 
     @Test
-    @DisplayName("setMaterialLookup 接受 null 不拋例外")
-    void testSetMaterialLookupNull() {
+    @DisplayName("lookup setters accept null")
+    void testLookupSettersAcceptNull() {
         assertDoesNotThrow(() -> PFSFEngine.setMaterialLookup(null));
-    }
-
-    @Test
-    @DisplayName("setAnchorLookup 接受 null 不拋例外")
-    void testSetAnchorLookupNull() {
         assertDoesNotThrow(() -> PFSFEngine.setAnchorLookup(null));
-    }
-
-    @Test
-    @DisplayName("setFillRatioLookup 接受 null 不拋例外")
-    void testSetFillRatioLookupNull() {
         assertDoesNotThrow(() -> PFSFEngine.setFillRatioLookup(null));
     }
 
     @Test
-    @DisplayName("removeBuffer 對不存在的 ID 不拋例外")
+    @DisplayName("removeBuffer ignores unknown island ids")
     void testRemoveNonExistentBuffer() {
         assertDoesNotThrow(() -> PFSFEngine.removeBuffer(999999));
     }
 
     @Test
-    @DisplayName("onServerTick 無 GPU 時安全跳過")
+    @DisplayName("onServerTick is safe when no GPU solver is active")
     void testOnServerTickNoGpu() {
-        // Should silently return when not available
         assertDoesNotThrow(() -> PFSFEngine.onServerTick(null, null, 0));
     }
 
     @Test
-    @DisplayName("模組委派：6 個提取類別應存在")
+    @DisplayName("extracted helper classes remain loadable")
     void testExtractedClassesExist() {
-        // Confirm that all extracted categories can be loaded
         assertDoesNotThrow(() -> {
             Class.forName("com.blockreality.api.physics.pfsf.PFSFPipelineFactory");
             Class.forName("com.blockreality.api.physics.pfsf.PFSFDataBuilder");
@@ -87,17 +125,19 @@ class PFSFEngineIntegrationTest {
     }
 
     @Test
-    @DisplayName("Failure type 對映完整性：4 種 PFSF failure → 4 種 FailureType enum")
+    @DisplayName("failure type mappings remain intact")
     void testFailureTypeMapping() {
-        // Ensure all PFSF failure constants map to valid FailureType values
         var failTypes = com.blockreality.api.physics.FailureType.values();
         assertTrue(failTypes.length >= 4,
                 "FailureType should have at least 4 values for PFSF modes");
 
-        // Verify specific mappings exist
         assertNotNull(com.blockreality.api.physics.FailureType.CANTILEVER_BREAK);
         assertNotNull(com.blockreality.api.physics.FailureType.CRUSHING);
         assertNotNull(com.blockreality.api.physics.FailureType.NO_SUPPORT);
         assertNotNull(com.blockreality.api.physics.FailureType.TENSION_BREAK);
+    }
+
+    private static void assertEqualsZero(long value, String message) {
+        assertTrue(value == 0L, message + " (actual=" + value + ")");
     }
 }

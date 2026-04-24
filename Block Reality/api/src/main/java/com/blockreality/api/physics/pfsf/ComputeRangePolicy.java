@@ -67,6 +67,12 @@ public final class ComputeRangePolicy {
      * @return 計算配置，或 null 表示拒絕此 island
      */
     public static Config decide(VramBudgetManager vramMgr, int islandVoxelCount) {
+        if (vramMgr == null) {
+            LOGGER.debug("[PFSF] VRAM manager unavailable, defaulting island {} to full-resolution native-safe config",
+                    islandVoxelCount);
+            return new Config(GridLevel.L0_FULL, 1.0f, true, true);
+        }
+
         float pressure = vramMgr.getPressure();
 
         if (pressure < PRESSURE_LOW) {
@@ -100,6 +106,8 @@ public final class ComputeRangePolicy {
      * @return 調整後的步數（至少 1）
      */
     public static int adjustSteps(int baseSteps, VramBudgetManager vramMgr) {
+        if (vramMgr == null) return Math.max(1, baseSteps);
+
         float pressure = vramMgr.getPressure();
 
         if (pressure < PRESSURE_LOW) return baseSteps;

@@ -4,16 +4,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * ComputeRangePolicy test — Validates VRAM stress ranking policy.
- *
- * v0.2a API:
- *   Config decide(VramBudgetManager, int voxelCount) → Config | null
- *   int adjustSteps(int baseSteps, VramBudgetManager) → int
- *   Config: { GridLevel gridLevel, float stepMultiplier, boolean allocatePhaseField, boolean allocateMultigrid }
- */
 class ComputeRangePolicyTest {
 
     private VramBudgetManager mgr;
@@ -21,53 +15,57 @@ class ComputeRangePolicyTest {
     @BeforeEach
     void setUp() {
         mgr = new VramBudgetManager();
-        // init(VkPhysicalDevice) not called - using fallback budget
     }
 
     @Test
-    @DisplayName("低壓力（空載）→ decide 回傳非 null")
-    void testLowPressure_ReturnsConfig() {
-        // No distribution → pressure = 0
+    @DisplayName("low pressure returns a config")
+    void testLowPressureReturnsConfig() {
         ComputeRangePolicy.Config config = ComputeRangePolicy.decide(mgr, 1000);
-        assertNotNull(config, "低壓力時 decide 應回傳 Config");
+        assertNotNull(config);
     }
 
     @Test
-    @DisplayName("Config fields 可讀取")
+    @DisplayName("config fields are readable")
     void testConfigFieldsAccessible() {
         ComputeRangePolicy.Config config = ComputeRangePolicy.decide(mgr, 100);
-        if (config != null) {
-            assertNotNull(config.gridLevel);
-            assertTrue(config.stepMultiplier > 0);
-            // allocatePhaseField and allocateMultigrid are booleans — just access them
-            boolean pf = config.allocatePhaseField;
-            boolean mg = config.allocateMultigrid;
-        }
+        assertNotNull(config);
+        assertNotNull(config.gridLevel);
+        assertTrue(config.stepMultiplier > 0);
+        boolean pf = config.allocatePhaseField;
+        boolean mg = config.allocateMultigrid;
+        assertTrue(pf || !pf);
+        assertTrue(mg || !mg);
     }
 
     @Test
-    @DisplayName("高壓力 → 可能拒絕大 island")
-    void testHighPressure_MayReject() {
-        // fill budget
+    @DisplayName("null VRAM manager falls back to safe full resolution")
+    void testNullManagerFallsBackToFullResolution() {
+        ComputeRangePolicy.Config config = ComputeRangePolicy.decide(null, 2048);
+        assertNotNull(config);
+        assertEquals(ComputeRangePolicy.GridLevel.L0_FULL, config.gridLevel);
+        assertEquals(1.0f, config.stepMultiplier);
+    }
+
+    @Test
+    @DisplayName("high pressure may reject an island")
+    void testHighPressureMayReject() {
         long budget = mgr.getTotalBudget();
-        mgr.tryRecord(1L, (long)(budget * 0.96), VramBudgetManager.PARTITION_PFSF);
+        mgr.tryRecord(1L, (long) (budget * 0.96), VramBudgetManager.PARTITION_PFSF);
 
-        // Large islands may be rejected under high pressure
         ComputeRangePolicy.Config config = ComputeRangePolicy.decide(mgr, 100000);
-        // config may be null → that's valid behavior
+        assertTrue(config == null || config.stepMultiplier > 0);
     }
 
     @Test
-    @DisplayName("adjustSteps 回傳正整數")
+    @DisplayName("adjustSteps always returns non-negative")
     void testAdjustSteps() {
         int result = ComputeRangePolicy.adjustSteps(16, mgr);
-        assertTrue(result >= 0, "adjustSteps should return non-negative");
+        assertTrue(result >= 0);
     }
 
     @Test
-    @DisplayName("GridLevel 列舉值存在")
+    @DisplayName("grid levels exist")
     void testGridLevelEnum() {
-        // Verify the enum values exist
         ComputeRangePolicy.GridLevel[] levels = ComputeRangePolicy.GridLevel.values();
         assertTrue(levels.length > 0);
     }

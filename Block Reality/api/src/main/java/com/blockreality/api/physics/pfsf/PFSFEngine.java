@@ -72,7 +72,8 @@ public final class PFSFEngine {
     }
 
     public static boolean isAvailable() {
-        return instance != null && instance.isAvailable();
+        return NativePFSFRuntime.asRuntime().isAvailable()
+                || (instance != null && instance.isAvailable());
     }
 
     public static String getStats() {
