@@ -104,6 +104,16 @@ public class StructureIslandRegistry {
     // informs orphan decisions, it does not re-own the int-id registry.
     private static final ThreeTierOrchestrator topology = createTopology();
 
+    /**
+     * Elder-Rule fingerprint → legacy int islandId. Populated each tick
+     * by {@link #advanceTopology(long)} from the orchestrator's
+     * component bindings. Queryable from any thread; updates happen
+     * only on the server tick thread.
+     */
+    private static final ConcurrentHashMap<Long, Integer> fingerprintToIntId = new ConcurrentHashMap<>();
+    /** Reverse: int islandId → last seen Elder-Rule fingerprint. */
+    private static final ConcurrentHashMap<Integer, Long> intIdToFingerprint = new ConcurrentHashMap<>();
+
     private static ThreeTierOrchestrator createTopology() {
         ThreeTierOrchestrator t = new ThreeTierOrchestrator();
         t.setOrphanSink(event -> {
@@ -134,6 +144,29 @@ public class StructureIslandRegistry {
 
     /** Accessor for tests and advanced diagnostics. */
     public static ThreeTierOrchestrator getTopology() { return topology; }
+
+    /**
+     * Look up the Elder-Rule-stable fingerprint for a legacy int
+     * island id. Returns {@code 0L} when the island has not yet been
+     * reconciled (first tick not yet run) or has been destroyed.
+     * Downstream systems that want ID stability across split/merge —
+     * collapse journaling, persistence checkpoints, test oracles —
+     * should key on this value rather than the int id.
+     */
+    public static long getStableFingerprint(int islandId) {
+        Long fp = intIdToFingerprint.get(islandId);
+        return fp != null ? fp : 0L;
+    }
+
+    /**
+     * Reverse lookup: find the current int island id that represents
+     * the component with the given Elder-Rule fingerprint. Returns
+     * {@code -1} when the fingerprint is unknown.
+     */
+    public static int getIslandIdByFingerprint(long fingerprint) {
+        Integer id = fingerprintToIntId.get(fingerprint);
+        return id != null ? id : -1;
+    }
 
     /**
      * 將於 split 結束時傳送給 {@link #orphanListener} 的事件。
@@ -181,6 +214,8 @@ public class StructureIslandRegistry {
         orphanListener = null;
         nextIslandId.set(1);
         topology.reset();
+        fingerprintToIntId.clear();
+        intIdToFingerprint.clear();
     }
 
     /**
@@ -587,6 +622,8 @@ public class StructureIslandRegistry {
         islands.clear();
         pendingDestructions.clear(); // P2-C: 清除批次緩衝，避免跨世界殘留
         topology.reset();
+        fingerprintToIntId.clear();
+        intIdToFingerprint.clear();
         LOGGER.info("[IslandRegistry] Cleared all islands");
     }
 
@@ -617,6 +654,40 @@ public class StructureIslandRegistry {
             return;
         }
         topology.tick();
+        reconcileFingerprintMap();
+    }
+
+    /**
+     * Walk the orchestrator's last-tick component bindings and refresh
+     * the fingerprint↔int maps so every int island observed by this
+     * registry has an Elder-Rule fingerprint attached. Any fingerprint
+     * whose component has dissolved this tick drops out; any int id
+     * whose underlying voxels all vanished likewise drops from the
+     * reverse map. Runs on the server tick thread only; the maps
+     * themselves are ConcurrentHashMap so readers on other threads see
+     * a consistent snapshot per entry.
+     */
+    private static void reconcileFingerprintMap() {
+        // Build the new forward mapping from this tick's bindings.
+        java.util.Map<Long, Integer> freshForward = new HashMap<>();
+        for (ThreeTierOrchestrator.ComponentBinding b : topology.getLastComponentBindings()) {
+            long fp = b.identity().fingerprint();
+            int islandId = -1;
+            for (BlockPos p : b.voxels()) {
+                Integer id = blockToIsland.get(p);
+                if (id != null) { islandId = id; break; }
+            }
+            if (islandId >= 0) {
+                freshForward.put(fp, islandId);
+            }
+        }
+        // Replace both maps atomically-per-entry: drop stale, refresh live.
+        fingerprintToIntId.keySet().retainAll(freshForward.keySet());
+        fingerprintToIntId.putAll(freshForward);
+        intIdToFingerprint.clear();
+        for (var e : freshForward.entrySet()) {
+            intIdToFingerprint.put(e.getValue(), e.getKey());
+        }
     }
 
     // ═══════════════════════════════════════════════════════

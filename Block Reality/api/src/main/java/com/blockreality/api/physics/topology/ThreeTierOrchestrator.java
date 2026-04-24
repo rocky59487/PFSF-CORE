@@ -56,6 +56,21 @@ public final class ThreeTierOrchestrator {
     ) {}
 
     /**
+     * One connected component identified this tick together with its
+     * Elder-Rule-stable {@link PersistentIslandTracker.IslandIdentity}.
+     * Produced by {@link #getLastComponentBindings()} after every
+     * {@link #tick()} so host systems (e.g.
+     * {@code StructureIslandRegistry}) can reconcile int-id↔fingerprint
+     * mapping tables. {@link #anchored} mirrors whatever the BFS
+     * partition reported; {@code false} means the component is orphan.
+     */
+    public record ComponentBinding(
+            PersistentIslandTracker.IslandIdentity identity,
+            Set<BlockPos> voxels,
+            boolean anchored
+    ) {}
+
+    /**
      * External receiver for orphan events produced each tick. In
      * production this is wired to {@code CollapseManager.enqueueCollapse};
      * in unit tests it is a plain List-collecting lambda.
@@ -77,6 +92,13 @@ public final class ThreeTierOrchestrator {
     private IslandIdentityJournal journal;
     /** Cached identities from the previous tick, keyed by fingerprint. */
     private Map<Long, PersistentIslandTracker.IslandIdentity> prevTickLive = new HashMap<>();
+    /**
+     * Snapshot of every component identified by the most recent tick,
+     * in the order the BFS partition produced them. Populated at the
+     * end of {@link #tick()}; empty list on a fresh orchestrator before
+     * the first tick runs. Readers must treat the list as read-only.
+     */
+    private List<ComponentBinding> lastBindings = java.util.Collections.emptyList();
 
     public ThreeTierOrchestrator() {
         this.svdag   = new TopologicalSVDAG();
@@ -93,6 +115,7 @@ public final class ThreeTierOrchestrator {
         liveVoxels.clear();
         anchors.clear();
         prevTickLive = new HashMap<>();
+        lastBindings = java.util.Collections.emptyList();
         // Replace the SVDAG and tracker wholesale so no half-cleared
         // internal table can leak across worlds. The journal, if any,
         // is left attached — callers decide whether to clear it.
@@ -105,6 +128,12 @@ public final class ThreeTierOrchestrator {
     public void setOrphanSink(OrphanSink sink) { this.orphanSink = sink; }
     public void setIdentityJournal(IslandIdentityJournal journal) { this.journal = journal; }
     public IslandIdentityJournal getIdentityJournal() { return journal; }
+    /**
+     * Read the component snapshot captured at the end of the most
+     * recent {@link #tick()}. Used by host systems that need to map
+     * int-id islands to Elder-Rule fingerprints for the current frame.
+     */
+    public List<ComponentBinding> getLastComponentBindings() { return lastBindings; }
 
     /**
      * Apply a voxel change. Feeds both the SVDAG (for Tier-1 dirty
@@ -164,10 +193,14 @@ public final class ThreeTierOrchestrator {
         // Produce orphan events in the same component order Tier 3 returned them.
         List<OrphanEvent> orphans = new ArrayList<>();
         Map<Long, PersistentIslandTracker.IslandIdentity> newLive = new HashMap<>();
+        List<ComponentBinding> bindings = new ArrayList<>(partition.components().size());
         for (int i = 0; i < partition.components().size(); i++) {
             LabelPropagation.Component c = partition.components().get(i);
             PersistentIslandTracker.IslandIdentity id = ids.get(i);
             newLive.put(id.fingerprint(), id);
+
+            Set<BlockPos> members = Set.copyOf(c.members());
+            bindings.add(new ComponentBinding(id, members, c.anchored()));
 
             // Journal births for identities we have never seen before.
             if (journal != null && !prevTickLive.containsKey(id.fingerprint())
@@ -176,7 +209,7 @@ public final class ThreeTierOrchestrator {
             }
 
             if (!c.anchored()) {
-                OrphanEvent event = new OrphanEvent(id, Set.copyOf(c.members()));
+                OrphanEvent event = new OrphanEvent(id, members);
                 orphans.add(event);
                 if (journal != null) journal.recordOrphan(tracker.currentTick(), id, event.voxels());
                 if (orphanSink != null) {
@@ -184,6 +217,7 @@ public final class ThreeTierOrchestrator {
                 }
             }
         }
+        lastBindings = java.util.Collections.unmodifiableList(bindings);
 
         // Journal deaths: identities that were alive last tick but not this tick.
         if (journal != null) {
