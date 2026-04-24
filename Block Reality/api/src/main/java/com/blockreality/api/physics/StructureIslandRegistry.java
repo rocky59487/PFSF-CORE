@@ -5,6 +5,8 @@ import com.blockreality.api.material.DefaultMaterial;
 import com.blockreality.api.material.RMaterial;
 import com.blockreality.api.physics.PhysicsConstants;
 import com.blockreality.api.physics.pfsf.LabelPropagation;
+import com.blockreality.api.physics.topology.ThreeTierOrchestrator;
+import com.blockreality.api.physics.topology.TopologicalSVDAG;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
@@ -89,6 +91,50 @@ public class StructureIslandRegistry {
     @Nullable
     private static volatile Consumer<OrphanIslandEvent> orphanListener = null;
 
+    // ═══════════════════════════════════════════════════════════════
+    //  Topology v2: 正式上線 ThreeTierOrchestrator
+    // ═══════════════════════════════════════════════════════════════
+    // The safety-valve in orphanClassificationEnabled() has been keeping
+    // orphan detection off in production because anchorBlocks is empty.
+    // The topology/ rewrite solves this properly with Elder Rule identity
+    // and anchor-aware BFS; we mirror every register/unregister into it
+    // here and route its orphan events back through orphanListener so
+    // existing subscribers (CollapseManager) see the same OrphanIslandEvent
+    // shape. GPU int-id plumbing is untouched — the orchestrator only
+    // informs orphan decisions, it does not re-own the int-id registry.
+    private static final ThreeTierOrchestrator topology = createTopology();
+
+    private static ThreeTierOrchestrator createTopology() {
+        ThreeTierOrchestrator t = new ThreeTierOrchestrator();
+        t.setOrphanSink(event -> {
+            // Map new-system orphan voxels to the int-id the rest of the
+            // engine (GPU, CollapseManager subscribers) speaks. We look up
+            // the int island by any voxel in the orphan set; all members
+            // share the same int id because the CPU-side BFS always keeps
+            // blockToIsland coherent before this sink runs.
+            Set<BlockPos> voxels = event.voxels();
+            if (voxels.isEmpty()) return;
+            int islandId = -1;
+            for (BlockPos p : voxels) {
+                Integer id = blockToIsland.get(p);
+                if (id != null) { islandId = id; break; }
+            }
+            if (islandId < 0) {
+                // Voxels are known to the orchestrator but not the int
+                // registry — race between tick() and a concurrent
+                // unregister that already removed them. Ignore; next
+                // tick will reconcile.
+                return;
+            }
+            long epoch = ConnectivityCache.getStructureEpoch();
+            notifyOrphan(islandId, voxels, epoch, null);
+        });
+        return t;
+    }
+
+    /** Accessor for tests and advanced diagnostics. */
+    public static ThreeTierOrchestrator getTopology() { return topology; }
+
     /**
      * 將於 split 結束時傳送給 {@link #orphanListener} 的事件。
      * {@code level} 為觸發本次 split 的 ServerLevel（若呼叫者有提供，
@@ -107,12 +153,24 @@ public class StructureIslandRegistry {
 
     /** 將 {@code pos} 標記為錨點（若此前未登錄）。執行緒安全；可重複呼叫。 */
     public static void registerAnchor(BlockPos pos) {
-        anchorBlocks.add(pos.immutable());
+        BlockPos p = pos.immutable();
+        anchorBlocks.add(p);
+        // Mirror to topology so the new-system orphan classifier sees
+        // the same anchor set as the legacy isBlockAnchored() check.
+        topology.setVoxel(p.getX(), p.getY(), p.getZ(), TopologicalSVDAG.TYPE_ANCHOR);
     }
 
     /** 取消錨點登錄。若此前未登錄則為 no-op。 */
     public static void unregisterAnchor(BlockPos pos) {
         anchorBlocks.remove(pos);
+        // Demote back to a plain solid voxel if the block itself is
+        // still registered; otherwise reflect as air. The caller is
+        // expected to follow up with unregisterBlock if the block has
+        // actually been broken.
+        byte t = blockToIsland.containsKey(pos)
+                ? TopologicalSVDAG.TYPE_SOLID
+                : TopologicalSVDAG.TYPE_AIR;
+        topology.setVoxel(pos.getX(), pos.getY(), pos.getZ(), t);
     }
 
     /** 僅供測試：清除全部狀態（含錨點與 listener）以確保測試獨立性。 */
@@ -122,6 +180,7 @@ public class StructureIslandRegistry {
         anchorBlocks.clear();
         orphanListener = null;
         nextIslandId.set(1);
+        topology.reset();
     }
 
     /**
@@ -307,6 +366,16 @@ public class StructureIslandRegistry {
      * @return 此方塊所屬的 island ID
      */
     public static int registerBlock(BlockPos pos, long epoch) {
+        // Mirror into topology as a solid voxel before the int-id BFS
+        // runs; the orchestrator's own tick consumes this on the next
+        // advanceTopology() invocation.
+        {
+            byte t = anchorBlocks.contains(pos)
+                    ? TopologicalSVDAG.TYPE_ANCHOR
+                    : TopologicalSVDAG.TYPE_SOLID;
+            topology.setVoxel(pos.getX(), pos.getY(), pos.getZ(), t);
+        }
+
         Set<Integer> neighborIslands = new HashSet<>();
         for (Direction dir : Direction.values()) {
             Integer id = blockToIsland.get(pos.relative(dir));
@@ -396,6 +465,11 @@ public class StructureIslandRegistry {
      * @return 操作後仍存在的所有 island ID（原 island + 分裂出的新 island）；若 island 消失則空列表
      */
     public static List<Integer> unregisterBlock(ServerLevel level, BlockPos pos, long epoch) {
+        // Mirror into topology first; the orchestrator treats AIR as
+        // "not part of any component" and will drop the voxel from the
+        // next tick's BFS.
+        topology.setVoxel(pos.getX(), pos.getY(), pos.getZ(), TopologicalSVDAG.TYPE_AIR);
+
         Integer removedIslandId = blockToIsland.remove(pos);
         if (removedIslandId == null) return Collections.emptyList();
 
@@ -512,7 +586,37 @@ public class StructureIslandRegistry {
         blockToIsland.clear();
         islands.clear();
         pendingDestructions.clear(); // P2-C: 清除批次緩衝，避免跨世界殘留
+        topology.reset();
         LOGGER.info("[IslandRegistry] Cleared all islands");
+    }
+
+    /**
+     * Advance the topology v2 pipeline by one tick.
+     *
+     * <p>Called once per server tick by {@code ServerTickHandler} right
+     * after {@link #flushDestructions()} has applied all block changes
+     * for this tick. The orchestrator runs its BFS partition + Elder
+     * Rule update and fires {@link OrphanIslandEvent}s through the
+     * existing {@link #orphanListener} for any component that lost
+     * anchor connectivity this tick.
+     *
+     * <p>Safe to call on worlds without any registered anchors: the
+     * orchestrator simply reports every component as orphan, but the
+     * installed {@link com.blockreality.api.physics.topology.ThreeTierOrchestrator.OrphanSink}
+     * gates on {@link #anchorBlocks} non-emptiness the same way the
+     * legacy classifier did — so we never flood the collapse manager
+     * before anchor registration is wired from chunk-load.
+     */
+    public static void advanceTopology(long epoch) {
+        if (anchorBlocks.isEmpty()) {
+            // Without anchors every component looks orphan; honour the
+            // legacy safety-valve behaviour instead of spamming the
+            // collapse queue. Still drain the dirty set so the tracker
+            // stays in sync for the moment anchors do come online.
+            topology.getSvdag().drainDirtyRegions();
+            return;
+        }
+        topology.tick();
     }
 
     // ═══════════════════════════════════════════════════════
@@ -549,6 +653,13 @@ public class StructureIslandRegistry {
         // 快照 + 清空緩衝（允許本 tick 繼續排入下一個緩衝週期）
         Map<BlockPos, Long> snapshot = new HashMap<>(pendingDestructions);
         pendingDestructions.clear();
+
+        // Mirror the full batch into topology up front so a single
+        // advanceTopology() call at the end of the tick sees every
+        // removal at once rather than piecewise.
+        for (BlockPos p : snapshot.keySet()) {
+            topology.setVoxel(p.getX(), p.getY(), p.getZ(), TopologicalSVDAG.TYPE_AIR);
+        }
 
         // 按 island 分組
         Map<Integer, List<BlockPos>> byIsland = new HashMap<>();
@@ -730,11 +841,11 @@ public class StructureIslandRegistry {
         if (SAFETY_VALVE_LOGGED.compareAndSet(false, true)) {
             LOGGER.warn(
                 "[IslandRegistry] Safety valve active: anchorBlocks is empty; "
-                + "skipping orphan classification on every fracture. Natural-anchor "
-                + "registration is not yet wired to production; the replacement "
-                + "under physics/topology/ThreeTierOrchestrator addresses this "
-                + "properly. Register at least one anchor via registerAnchor(...) "
-                + "to re-enable classification."
+                + "neither the legacy BFS classifier nor the topology v2 "
+                + "orchestrator (now wired in advanceTopology) will fire "
+                + "OrphanIslandEvent until at least one anchor is registered "
+                + "via registerAnchor(...). Chunk-load natural-anchor "
+                + "registration is the outstanding wiring task."
             );
         }
         return false;

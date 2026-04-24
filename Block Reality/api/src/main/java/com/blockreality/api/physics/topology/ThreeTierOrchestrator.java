@@ -64,8 +64,11 @@ public final class ThreeTierOrchestrator {
         void onOrphan(OrphanEvent event);
     }
 
-    private final TopologicalSVDAG svdag;
-    private final PersistentIslandTracker tracker;
+    // Non-final so reset() can swap in a fresh tracker/SVDAG on world
+    // unload without reflection. Treat as final for read purposes — no
+    // external writer touches these fields.
+    private TopologicalSVDAG svdag;
+    private PersistentIslandTracker tracker;
     /** Mirror of every live voxel for fast component extraction. */
     private final Map<BlockPos, Byte> liveVoxels = new HashMap<>();
     /** Subset of {@link #liveVoxels} whose type is {@code TYPE_ANCHOR}. */
@@ -76,6 +79,23 @@ public final class ThreeTierOrchestrator {
     private Map<Long, PersistentIslandTracker.IslandIdentity> prevTickLive = new HashMap<>();
 
     public ThreeTierOrchestrator() {
+        this.svdag   = new TopologicalSVDAG();
+        this.tracker = new PersistentIslandTracker();
+    }
+
+    /**
+     * Drop all voxel state and allocate fresh SVDAG + tracker. Used on
+     * world unload and by unit tests; the persistence journal (if
+     * attached) is <b>not</b> cleared because callers may want the
+     * birth/death record across worlds.
+     */
+    public synchronized void reset() {
+        liveVoxels.clear();
+        anchors.clear();
+        prevTickLive = new HashMap<>();
+        // Replace the SVDAG and tracker wholesale so no half-cleared
+        // internal table can leak across worlds. The journal, if any,
+        // is left attached — callers decide whether to clear it.
         this.svdag   = new TopologicalSVDAG();
         this.tracker = new PersistentIslandTracker();
     }
