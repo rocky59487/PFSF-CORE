@@ -79,6 +79,27 @@ public class BrCommand {
                     long epoch = ConnectivityCache.getStructureEpoch();
                     String cacheStats = ConnectivityCache.getCacheStats();
 
+                    // Registry / anchor / topology counts — these are
+                    // the "is physics actually seeing anything" signals.
+                    // If registered == 0 the whole stack can be green
+                    // but nothing is being simulated, which is the
+                    // silent-failure mode we most want to surface.
+                    int registered =
+                            com.blockreality.api.physics.StructureIslandRegistry.getTotalRegisteredBlocks();
+                    int islandCount =
+                            com.blockreality.api.physics.StructureIslandRegistry.getIslandCount();
+                    int anchorCount =
+                            com.blockreality.api.physics.StructureIslandRegistry.getAnchorCount();
+                    long topologyTick =
+                            com.blockreality.api.physics.StructureIslandRegistry.getTopologyTick();
+                    boolean pnsmOn = BRConfig.isPNSMShadowEnabled();
+                    int pnsmLeaves = pnsmOn
+                            ? com.blockreality.api.physics.pnsm.PNSMShadow.leafCount()
+                            : 0;
+                    long pnsmMuts = pnsmOn
+                            ? com.blockreality.api.physics.pnsm.PNSMShadow.mutationCount()
+                            : 0L;
+
                     src.sendSuccess(() -> Component.literal("=== Block Reality Status ===")
                         .withStyle(ChatFormatting.GOLD), false);
                     src.sendSuccess(() -> Component.literal("  Physics: " + (physicsOn ? "ON" : "OFF"))
@@ -95,6 +116,19 @@ public class BrCommand {
                         .withStyle(shadersMiss == 0 && shadersReg > 0
                                 ? ChatFormatting.GREEN
                                 : (shadersReg == 0 ? ChatFormatting.RED : ChatFormatting.YELLOW)), false);
+                    src.sendSuccess(() -> Component.literal(
+                            "  Registry: blocks=" + registered + " islands=" + islandCount
+                                    + " anchors=" + anchorCount)
+                        .withStyle(registered > 0
+                                ? (anchorCount > 0 ? ChatFormatting.GREEN : ChatFormatting.YELLOW)
+                                : ChatFormatting.GRAY), false);
+                    src.sendSuccess(() -> Component.literal("  Topology tick: " + topologyTick)
+                        .withStyle(ChatFormatting.GRAY), false);
+                    if (pnsmOn) {
+                        src.sendSuccess(() -> Component.literal(
+                                "  PNSM shadow: leaves=" + pnsmLeaves + " mutations=" + pnsmMuts)
+                            .withStyle(ChatFormatting.AQUA), false);
+                    }
                     src.sendSuccess(() -> Component.literal("  Epoch: " + epoch), false);
                     src.sendSuccess(() -> Component.literal("  Cache: " + cacheStats)
                         .withStyle(ChatFormatting.GRAY), false);
