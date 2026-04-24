@@ -245,6 +245,7 @@ public class StructureIslandRegistry {
         fingerprintToIntId.clear();
         intIdToFingerprint.clear();
         lastMutationTick.clear();
+        com.blockreality.api.physics.pnsm.PNSMShadow.reset();
     }
 
     /**
@@ -458,6 +459,11 @@ public class StructureIslandRegistry {
                     : TopologicalSVDAG.TYPE_SOLID;
             topology.setVoxel(pos.getX(), pos.getY(), pos.getZ(), t);
         }
+        // Mirror into the PNSM shadow (Phase 1 of the RFC at
+        // docs/design/pfsf-native-structural-memory.md). No-op when
+        // the flag is off; idempotent when it is on, so re-registering
+        // an already-live pos produces no drift.
+        com.blockreality.api.physics.pnsm.PNSMShadow.mirrorInsert(pos);
 
         Set<Integer> neighborIslands = new HashSet<>();
         for (Direction dir : Direction.values()) {
@@ -552,6 +558,10 @@ public class StructureIslandRegistry {
         // "not part of any component" and will drop the voxel from the
         // next tick's BFS.
         topology.setVoxel(pos.getX(), pos.getY(), pos.getZ(), TopologicalSVDAG.TYPE_AIR);
+        // PNSM shadow mirror — runs unconditionally so a remove of a
+        // pos that was never inserted still leaves both sides in sync
+        // (the shadow's compute() drops empty leaves cleanly).
+        com.blockreality.api.physics.pnsm.PNSMShadow.mirrorRemove(pos);
 
         Integer removedIslandId = blockToIsland.remove(pos);
         if (removedIslandId == null) return Collections.emptyList();
@@ -602,6 +612,18 @@ public class StructureIslandRegistry {
     /** 取得已登錄的方塊總數 */
     public static int getTotalRegisteredBlocks() {
         return blockToIsland.size();
+    }
+
+    /**
+     * Snapshot of every currently-registered voxel. Only intended for
+     * diagnostic consumers (the PNSM shadow-mode diff, /br status) —
+     * each call copies the keySet into a new HashSet, so do not call
+     * this in the physics hot loop. Returning a copy rather than the
+     * live keySet keeps the caller safe against concurrent mutation
+     * from the server tick thread while iterating.
+     */
+    public static java.util.Set<BlockPos> snapshotRegisteredVoxels() {
+        return new java.util.HashSet<>(blockToIsland.keySet());
     }
 
     /** 取得 island 數量 */
@@ -679,6 +701,7 @@ public class StructureIslandRegistry {
         fingerprintToIntId.clear();
         intIdToFingerprint.clear();
         lastMutationTick.clear();
+        com.blockreality.api.physics.pnsm.PNSMShadow.reset();
         LOGGER.info("[IslandRegistry] Cleared all islands");
     }
 
@@ -807,6 +830,7 @@ public class StructureIslandRegistry {
             // 從追蹤移除所有方塊
             for (BlockPos pos : removals) {
                 blockToIsland.remove(pos);
+                com.blockreality.api.physics.pnsm.PNSMShadow.mirrorRemove(pos);
             }
 
             StructureIsland island = islands.get(islandId);

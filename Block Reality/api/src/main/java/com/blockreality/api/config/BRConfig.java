@@ -166,6 +166,18 @@ public class BRConfig {
     public final ForgeConfigSpec.BooleanValue overturningEnabledConfig;
     public final ForgeConfigSpec.DoubleValue  stabilityDeadbandConfig;
 
+    // ─── PNSM (PFSF-Native Structural Memory) — shadow-mode experiment ───
+    /**
+     * Phase 1 shadow-mirror flag for the PNSM RFC (see
+     * {@code docs/design/pfsf-native-structural-memory.md}). When
+     * enabled, every {@code StructureIslandRegistry} mutation is
+     * mirrored into a parallel SO-DAG and diffed at tick end against
+     * the legacy voxel set; disagreement logs a warning. Never
+     * affects user-visible behaviour. Off by default; flip on only
+     * in development and playtest instances.
+     */
+    public final ForgeConfigSpec.BooleanValue pnsmShadowEnabledConfig;
+
     static {
         ForgeConfigSpec.Builder builder = new ForgeConfigSpec.Builder();
         INSTANCE = new BRConfig(builder);
@@ -396,6 +408,17 @@ public class BRConfig {
         stabilityDeadbandConfig = builder
             .comment("CoM stability deadband ratio (0.0–0.5). CoM must exceed support edge by this fraction to trigger overturning.")
             .defineInRange("stability_deadband", 0.15, 0.0, 0.5);
+
+        builder.pop().push("pnsm_shadow");
+
+        pnsmShadowEnabledConfig = builder
+            .comment(
+                "Phase 1 shadow-mirror for the PFSF-Native Structural Memory RFC.",
+                "When true, every StructureIslandRegistry mutation is mirrored into a",
+                "parallel leaf-map, and every server tick diffs the reconstructed voxel",
+                "set against the registry. Disagreement logs a warning and does not alter",
+                "gameplay. Development / playtest only; leave off in production.")
+            .define("enabled", false);
 
         builder.pop();
     }
@@ -644,6 +667,17 @@ public class BRConfig {
     public static void setCascadeEnabled(boolean enabled) {
         cascadeEnabled = enabled;
         if (INSTANCE != null) INSTANCE.cascadeEnabledConfig.set(enabled);
+    }
+
+    // ─── PNSM shadow-mode gate ───
+    /**
+     * Whether the PNSM shadow-mirror layer (Phase 1 of the RFC at
+     * {@code docs/design/pfsf-native-structural-memory.md}) is active.
+     * Default false; the flag is read once per mutation and once per
+     * tick, so flipping it mid-session is honoured immediately.
+     */
+    public static boolean isPNSMShadowEnabled() {
+        return INSTANCE != null && INSTANCE.pnsmShadowEnabledConfig.get();
     }
 
     /**
