@@ -325,6 +325,19 @@ public class PFSFIslandBuffer {
     public long getLabelComponentsStagingBuffer() { return labelComponentsStagingBuf != null ? labelComponentsStagingBuf[0] : 0; }
 
     private void freeGpuResources() {
+        // Barrier against use-after-free. Every entry path — LRU
+        // evictor, world unload, ref-count reaching zero — funnels
+        // through here, and any of them can run while a previous tick's
+        // compute dispatch is still executing on these buffers. The
+        // existing per-operation waitFenceAndFree calls only cover the
+        // dispatch path that did the recording; they cannot protect
+        // against a _different_ caller tearing down the buffers
+        // mid-flight. A compute-queue idle wait is cheap when the queue
+        // is already drained (the common case at evict time) and
+        // essential when it isn't. Using queue-idle rather than
+        // device-idle keeps render/transfer queues unblocked.
+        VulkanComputeContext.waitComputeQueueIdle();
+
         freeLabelProp();
         freeBufferPair(coalescedBuf); coalescedBuf = null;
         freeBufferPair(stagingBuf); stagingBuf = null;

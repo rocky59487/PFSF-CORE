@@ -817,6 +817,21 @@ public final class VulkanComputeContext {
         vkFreeCommandBuffers(vkDeviceObj, commandPool, cmdBuf);
     }
 
+    /**
+     * Block the calling thread until the compute queue has finished
+     * every submission currently queued on it. Used by
+     * {@code PFSFIslandBuffer.freeGpuResources} as a barrier before
+     * {@code vkDestroyBuffer}, so an LRU-evicted buffer cannot be
+     * torn down while a still-executing compute shader references it.
+     * No-op when the Vulkan device has not been initialised yet (e.g.
+     * call paths that short-circuit on headless test machines) so the
+     * caller can use this unconditionally.
+     */
+    public static void waitComputeQueueIdle() {
+        if (vkDeviceObj == null || computeQueueObj == null) return;
+        vkQueueWaitIdle(computeQueueObj);
+    }
+
     // ═══════════════════════════════════════════════════════════════
     //  v3: Fence-Based Async Commands（取代 vkQueueWaitIdle）
     // ═══════════════════════════════════════════════════════════════
