@@ -677,7 +677,12 @@ public class BRConfig {
      * tick, so flipping it mid-session is honoured immediately.
      */
     public static boolean isPNSMShadowEnabled() {
-        return INSTANCE != null && INSTANCE.pnsmShadowEnabledConfig.get();
+        if (INSTANCE == null) return false;
+        try {
+            return INSTANCE.pnsmShadowEnabledConfig.get();
+        } catch (IllegalStateException ignored) {
+            return false;
+        }
     }
 
     /**

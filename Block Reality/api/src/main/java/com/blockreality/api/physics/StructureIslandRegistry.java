@@ -221,6 +221,11 @@ public class StructureIslandRegistry {
         topology.setVoxel(p.getX(), p.getY(), p.getZ(), TopologicalSVDAG.TYPE_ANCHOR);
     }
 
+    /** Returns whether {@code pos} is currently registered as an anchor voxel. */
+    public static boolean isAnchorRegistered(BlockPos pos) {
+        return anchorBlocks.contains(pos);
+    }
+
     /** 取消錨點登錄。若此前未登錄則為 no-op。 */
     public static void unregisterAnchor(BlockPos pos) {
         anchorBlocks.remove(pos);
@@ -586,7 +591,21 @@ public class StructureIslandRegistry {
         // fragment in the same tick as the fracture. This is the
         // correctness fix for the "floating blocks persist for several
         // ticks" symptom reported by the user.
-        return checkAndSplitIsland(island, removedIslandId, epoch, level);
+        return checkAndSplitIsland(island, removedIslandId, epoch, level, true);
+    }
+
+    /**
+     * Re-run anchor/orphan classification for an island whose surrounding
+     * world support changed without directly adding/removing one of the island's
+     * own voxels.
+     */
+    public static List<Integer> refreshAnchorState(@Nullable ServerLevel level, int islandId, long epoch) {
+        StructureIsland island = islands.get(islandId);
+        if (island == null || island.getBlockCount() == 0) {
+            return Collections.emptyList();
+        }
+        markDirty(islandId);
+        return checkAndSplitIsland(island, islandId, epoch, level, true);
     }
 
     // ═══════════════════════════════════════════════════════
@@ -894,6 +913,14 @@ public class StructureIslandRegistry {
                                                      int islandId,
                                                      long epoch,
                                                      @Nullable ServerLevel level) {
+        return checkAndSplitIsland(island, islandId, epoch, level, false);
+    }
+
+    private static List<Integer> checkAndSplitIsland(StructureIsland island,
+                                                     int islandId,
+                                                     long epoch,
+                                                     @Nullable ServerLevel level,
+                                                     boolean allowAnchorlessClassification) {
         if (island.getBlockCount() == 0) {
             islands.remove(islandId);
             return Collections.emptyList();
@@ -902,7 +929,7 @@ public class StructureIslandRegistry {
             island.recalculateBounds();
             BlockPos only = island.members.iterator().next();
             boolean anchored = isBlockAnchored(only);
-            if (!anchored && orphanClassificationEnabled()) {
+            if (!anchored && orphanClassificationEnabled(allowAnchorlessClassification)) {
                 notifyOrphan(islandId, Set.of(only), epoch, level);
             }
             return Collections.singletonList(islandId);
@@ -921,7 +948,7 @@ public class StructureIslandRegistry {
             // just removed), surface it to the orphan listener.
             island.recalculateBounds();
             LabelPropagation.Component sole = partition.components().get(0);
-            if (!sole.anchored() && orphanClassificationEnabled()) {
+            if (!sole.anchored() && orphanClassificationEnabled(allowAnchorlessClassification)) {
                 notifyOrphan(islandId, sole.members(), epoch, level);
             }
             return Collections.singletonList(islandId);
@@ -969,7 +996,7 @@ public class StructureIslandRegistry {
 
         List<Integer> resultIds = new java.util.ArrayList<>();
         resultIds.add(islandId);
-        if (!keep.anchored() && orphanClassificationEnabled()) {
+        if (!keep.anchored() && orphanClassificationEnabled(allowAnchorlessClassification)) {
             // Even the "kept" component is orphan — tell CollapseManager.
             notifyOrphan(islandId, keep.members(), epoch, level);
         }
@@ -989,7 +1016,7 @@ public class StructureIslandRegistry {
             resultIds.add(newId);
             LOGGER.info("[IslandRegistry] Split: new island {} with {} blocks from island {} (anchored={})",
                     newId, c.members().size(), islandId, c.anchored());
-            if (!c.anchored() && orphanClassificationEnabled()) {
+            if (!c.anchored() && orphanClassificationEnabled(allowAnchorlessClassification)) {
                 notifyOrphan(newId, c.members(), epoch, level);
             }
         }
@@ -1012,7 +1039,8 @@ public class StructureIslandRegistry {
      * Logs the first trigger per JVM so operators can tell the valve
      * is in effect.
      */
-    private static boolean orphanClassificationEnabled() {
+    private static boolean orphanClassificationEnabled(boolean allowAnchorlessClassification) {
+        if (allowAnchorlessClassification) return true;
         if (!anchorBlocks.isEmpty()) return true;
         if (SAFETY_VALVE_LOGGED.compareAndSet(false, true)) {
             LOGGER.warn(

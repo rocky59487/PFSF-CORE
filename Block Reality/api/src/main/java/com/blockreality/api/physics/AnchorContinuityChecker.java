@@ -1,5 +1,6 @@
 package com.blockreality.api.physics;
 
+import com.blockreality.api.block.RBlock;
 import com.blockreality.api.block.RBlockEntity;
 import com.blockreality.api.config.BRConfig;
 import com.blockreality.api.material.BlockType;
@@ -139,7 +140,28 @@ public class AnchorContinuityChecker implements IAnchorChecker {
             return true;
         }
 
+        // Treat contact with a sturdy non-physics world block as a natural
+        // foundation. This covers the common case where RBlocks are built on
+        // terrain rather than directly on bedrock.
+        for (Direction dir : ALL_DIRS) {
+            if (hasStableExternalSupport(level, pos, dir)) {
+                return true;
+            }
+        }
+
         return false;
+    }
+
+    private static boolean hasStableExternalSupport(ServerLevel level, BlockPos pos, Direction dir) {
+        BlockPos supportPos = pos.relative(dir);
+        BlockState supportState = level.getBlockState(supportPos);
+        if (supportState.isAir() || !supportState.getFluidState().isEmpty()) {
+            return false;
+        }
+        if (supportState.getBlock() instanceof RBlock) {
+            return false;
+        }
+        return supportState.isFaceSturdy(level, supportPos, dir.getOpposite());
     }
 
     // ─── 快取管理（no-op — 純幾何判定無需快取）──────────────
