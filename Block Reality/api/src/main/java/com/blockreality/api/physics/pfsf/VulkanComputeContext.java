@@ -960,29 +960,91 @@ public final class VulkanComputeContext {
      *
      * <p>PFSF 和 Fluid 應各持有自己的 pool，各自在不同時機重置，
      * 避免 PFSF 每 20 tick 重置時使 Fluid 的 pending descriptor 失效。</p>
+     *
+     * <p>The returned handle behaves like a regular Vulkan pool for
+     * the purposes of {@link #resetDescriptorPool} /
+     * {@link #destroyDescriptorPool} / {@link #allocateDescriptorSet},
+     * but is silently backed by a growable ring: if mid-tick
+     * allocation exhausts the primary pool, this class allocates a
+     * secondary with identical dimensions and keeps the ring alive
+     * across ticks. Reset drains every pool in the ring, destroy
+     * tears every pool down. Callers never have to handle
+     * {@code VK_ERROR_OUT_OF_POOL_MEMORY} — the allocation paths
+     * retry transparently until either success or device OOM.</p>
      */
     public static long createIsolatedDescriptorPool(int maxSets, int maxStorageBuffers, String ownerName) {
         long pool = createDescriptorPool(maxSets, maxStorageBuffers);
+        poolRings.put(pool, new PoolRing(maxSets, maxStorageBuffers, ownerName));
         LOGGER.info("[VulkanCompute] Created isolated descriptor pool for '{}': maxSets={}, maxBuffers={}",
                 ownerName, maxSets, maxStorageBuffers);
         return pool;
     }
 
+    /** Accounting for a growable descriptor pool created through
+     *  {@link #createIsolatedDescriptorPool}. */
+    private static final class PoolRing {
+        final int maxSets;
+        final int maxStorageBuffers;
+        final String ownerName;
+        /** Extra pools allocated when the primary exhausts mid-tick.
+         *  Indexed in creation order; allocation searches primary
+         *  first then walks this list. */
+        final java.util.List<Long> secondaries = new java.util.ArrayList<>();
+        PoolRing(int maxSets, int maxStorageBuffers, String ownerName) {
+            this.maxSets = maxSets;
+            this.maxStorageBuffers = maxStorageBuffers;
+            this.ownerName = ownerName;
+        }
+    }
+
+    /** primary pool handle → its ring metadata. Accessed only on the
+     *  tick thread so a ConcurrentHashMap is overkill; HashMap with
+     *  synchronised access would also do. Using ConcurrentHashMap to
+     *  stay safe if anyone ever calls reset from a worker thread. */
+    private static final java.util.concurrent.ConcurrentHashMap<Long, PoolRing> poolRings =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
     /**
      * C8-fix: 銷毀 descriptor pool。
+     *
+     * <p>Also tears down every secondary pool in the growable ring —
+     * otherwise a long-running server that hits pool-full once
+     * would leak descriptor memory on every shutdown.</p>
      */
     public static void destroyDescriptorPool(long pool) {
+        PoolRing ring = poolRings.remove(pool);
+        if (ring != null) {
+            for (long extra : ring.secondaries) {
+                vkDestroyDescriptorPool(vkDeviceObj, extra, null);
+            }
+        }
         vkDestroyDescriptorPool(vkDeviceObj, pool, null);
     }
 
     /**
      * A2-fix: 重置 descriptor pool（O(1) 操作，釋放所有已分配的 set）。
      * 每 tick 開頭呼叫，避免 pool 耗盡。
+     *
+     * <p>When the handle was created through
+     * {@link #createIsolatedDescriptorPool}, this also resets every
+     * grown secondary so the entire ring starts the next tick empty.
+     * Primary-only reset would let stale sets linger in secondaries
+     * and eventually exhaust device memory, defeating the purpose of
+     * the ring.</p>
      */
     public static void resetDescriptorPool(long pool) {
         int result = vkResetDescriptorPool(vkDeviceObj, pool, 0);
         if (result != VK_SUCCESS) {
             LOGGER.warn("[PFSF] vkResetDescriptorPool failed: {}", result);
+        }
+        PoolRing ring = poolRings.get(pool);
+        if (ring != null) {
+            for (long extra : ring.secondaries) {
+                int r2 = vkResetDescriptorPool(vkDeviceObj, extra, 0);
+                if (r2 != VK_SUCCESS) {
+                    LOGGER.warn("[PFSF] vkResetDescriptorPool(secondary) failed: {}", r2);
+                }
+            }
         }
     }
 
@@ -996,6 +1058,50 @@ public final class VulkanComputeContext {
      *         呼叫者應在收到 0 時重置 pool 後重試，而非假設永遠成功。
      */
     public static long allocateDescriptorSet(long pool, long layout) {
+        // Fast path: try the primary pool first. This is the only
+        // code path ever hit once the ring is warm.
+        long set = tryAllocateFromPool(pool, layout);
+        if (set != 0) return set;
+
+        // Primary exhausted — walk existing secondaries before
+        // growing. For a ring that has already grown once under load
+        // the secondary usually has room for the current alloc.
+        PoolRing ring = poolRings.get(pool);
+        if (ring == null) {
+            // No ring — legacy caller that didn't go through
+            // createIsolatedDescriptorPool. Preserve the old
+            // "return 0, caller handles" contract so we don't break
+            // any ad-hoc pool usage.
+            return 0;
+        }
+        for (long extra : ring.secondaries) {
+            set = tryAllocateFromPool(extra, layout);
+            if (set != 0) return set;
+        }
+
+        // All existing pools in the ring are full. Grow by one.
+        long grown = createDescriptorPool(ring.maxSets, ring.maxStorageBuffers);
+        ring.secondaries.add(grown);
+        LOGGER.warn("[PFSF] Descriptor pool '{}' grew: now {} pools of maxSets={} in ring",
+                ring.ownerName, 1 + ring.secondaries.size(), ring.maxSets);
+        set = tryAllocateFromPool(grown, layout);
+        if (set == 0) {
+            // A freshly created empty pool that still cannot allocate
+            // one set means the caller's layout requires more
+            // descriptors than maxStorageBuffers permits — a hard
+            // configuration error rather than a capacity problem.
+            throw new RuntimeException(
+                    "vkAllocateDescriptorSets failed on an empty descriptor pool — "
+                    + "layout needs more storage buffers than pool maxStorageBuffers="
+                    + ring.maxStorageBuffers);
+        }
+        return set;
+    }
+
+    /** Try one allocation against a single pool. Returns 0 on
+     *  OUT_OF_POOL_MEMORY / FRAGMENTED_POOL (caller decides whether
+     *  to grow); rethrows on any other failure code. */
+    private static long tryAllocateFromPool(long pool, long layout) {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkDescriptorSetAllocateInfo allocInfo = VkDescriptorSetAllocateInfo.calloc(stack)
                     .sType(VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO)
@@ -1005,7 +1111,6 @@ public final class VulkanComputeContext {
             LongBuffer pSet = stack.mallocLong(1);
             int result = vkAllocateDescriptorSets(vkDeviceObj, allocInfo, pSet);
             if (result == VK11.VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL) {
-                LOGGER.warn("[PFSF] Descriptor pool full ({}), caller must reset pool", result);
                 return 0;
             }
             if (result != VK_SUCCESS) {
