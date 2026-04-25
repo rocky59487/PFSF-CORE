@@ -250,7 +250,6 @@ public class BlockRealityMod {
         com.blockreality.api.physics.pfsf.VulkanComputeContext.shutdown();
 
         // 清理快取（避免跨世界洩漏）
-        AnchorContinuityChecker.getInstance().clearCache();
         ConnectivityCache.clearCache();
         CollapseManager.clearQueue();
         StructureFragmentManager.clearAll();
