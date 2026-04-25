@@ -3,7 +3,6 @@ package com.blockreality.api.physics.pfsf;
 import com.blockreality.api.collapse.CollapseManager;
 import com.blockreality.api.physics.FailureType;
 import com.blockreality.api.physics.StressField;
-import com.blockreality.api.physics.StructureIslandRegistry;
 import it.unimi.dsi.fastutil.objects.Object2FloatOpenHashMap;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
@@ -97,105 +96,19 @@ public final class PFSFResultProcessor {
             }
         }
 
-        // Label-propagation readback (Phase B.2) — runs only when the
-        // feature flag is on AND the island's label-prop buffers were
-        // allocated. When either gate is false this is a zero-cost no-op,
-        // preserving byte-identical behaviour for the default build path.
-        if (PFSFIslandBuffer.isLabelPropEnabled() && buf.isLabelPropAllocated()) {
-            try {
-                PFSFLabelPropRecorder.DecodedComponents decoded =
-                        PFSFLabelPropRecorder.readbackAfterFence(buf);
-                processLabelPropComponents(buf, level, decoded);
-            } catch (Exception e) {
-                LOGGER.warn("[PFSF] Label-prop readback error for island {}: {}", buf.getIslandId(), e.getMessage());
-            }
-        }
+        // PR2 (audit-fixes): label-propagation collapse path was removed.
+        // The GPU label-prop kernels and PFSFLabelPropRecorder are still
+        // dispatched when -Dblockreality.pfsf.gpuLabelProp=true (default
+        // false), but their readback no longer feeds CollapseManager —
+        // PFSF failure_scan + per-pos triggerPFSFCollapse is the only
+        // collapse-triggering path now. The dispatch infrastructure is
+        // retained for diagnostic parity until a follow-up PR removes it.
 
         // M10: 週期性應力同步到客戶端
         try { syncStressToClients(buf, level); }
         catch (Exception e) {
             LOGGER.warn("[PFSF] Stress sync error for island {}: {}", buf.getIslandId(), e.getMessage());
         }
-    }
-
-    /**
-     * Route GPU-decoded component metadata to the CPU-side registry and
-     * CollapseManager. Orphan components (anchored == false) are enqueued
-     * as NO_SUPPORT collapses immediately; anchored components are
-     * reported to {@link StructureIslandRegistry#applyGpuComponent} for
-     * future reconciliation.
-     *
-     * <p>Overflow case: if the GPU reports more components than our
-     * metadata array can hold, we log and fall back — the CPU SV path
-     * already ran (synchronously, in Phase A's split handler) so state
-     * remains correct; we just lose the GPU-accelerated orphan trigger
-     * for that single tick.
-     */
-    private void processLabelPropComponents(PFSFIslandBuffer buf,
-                                            ServerLevel level,
-                                            PFSFLabelPropRecorder.DecodedComponents decoded) {
-        if (decoded.overflow()) {
-            LOGGER.warn("[PFSF] Label-prop overflow on island {} ({} components); deferring to CPU Phase-A path",
-                    buf.getIslandId(), decoded.numComponents());
-            return;
-        }
-        long epoch = 0L;
-        int originX = buf.getOrigin().getX();
-        int originY = buf.getOrigin().getY();
-        int originZ = buf.getOrigin().getZ();
-        for (var comp : decoded.components()) {
-            if (!comp.anchored()) {
-                // Orphan — collect its voxel positions from the voxel type
-                // buffer filtered by islandId == rootLabel. This walk is
-                // O(N) but bounded by the island volume and only happens
-                // when an orphan actually exists.
-                java.util.Set<BlockPos> orphanBlocks =
-                        collectVoxelsForRoot(buf, comp.rootLabel(),
-                                comp.aabbMinX(), comp.aabbMinY(), comp.aabbMinZ(),
-                                comp.aabbMaxX(), comp.aabbMaxY(), comp.aabbMaxZ());
-                if (!orphanBlocks.isEmpty()) {
-                    CollapseManager.enqueueCollapse(level, orphanBlocks, FailureType.NO_SUPPORT);
-                }
-            } else {
-                StructureIslandRegistry.applyGpuComponent(
-                        buf.getIslandId(), comp, originX, originY, originZ, epoch);
-            }
-        }
-    }
-
-    /**
-     * Walk the island's AABB and collect world-space {@link BlockPos}
-     * positions whose islandId matches {@code rootLabel}. Used to
-     * translate an orphan {@code ComponentMeta} into a
-     * {@code Set<BlockPos>} for {@link CollapseManager#enqueueCollapse}.
-     *
-     * <p>For large anchored islands we skip this walk entirely (the
-     * caller only invokes it for anchored == false), so the cost is
-     * paid only for actually-orphan fragments.
-     */
-    private java.util.Set<BlockPos> collectVoxelsForRoot(PFSFIslandBuffer buf, int rootLabel,
-                                                         int minX, int minY, int minZ,
-                                                         int maxX, int maxY, int maxZ) {
-        java.util.Set<BlockPos> out = new java.util.HashSet<>();
-        long stagingHandle = buf.getLabelIdBuf();
-        if (stagingHandle == 0) return out;
-        // We need the actual islandId[] buffer content on CPU. Rather
-        // than staging the full N × 4 bytes every tick (defeats the
-        // summarise-only readback design), we walk the type buffer on
-        // CPU from the island's DBB mirror and filter by root-label
-        // inferred from voxel flat index.
-        // NOTE: the label-propagation guarantee is that every voxel
-        // in an orphan component has islandId equal to the component's
-        // rootLabel (= rootVoxelFlatIdx + 1). For now we do not stage
-        // islandId[] back to CPU; full orphan-voxel enumeration would
-        // require that stage. The conservative current behaviour: if
-        // an orphan component exists, we flag the island dirty and
-        // rely on the Phase-A CPU split handler (which runs
-        // synchronously on block destruction) to produce the real
-        // orphan voxel set through StructureIslandRegistry's listener.
-        // This keeps correctness intact while the GPU path is still
-        // being validated on real hardware.
-        return out;
     }
 
     /**

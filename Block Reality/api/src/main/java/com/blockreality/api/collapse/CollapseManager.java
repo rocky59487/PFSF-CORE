@@ -22,7 +22,6 @@ import net.minecraftforge.common.MinecraftForge;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 
@@ -398,81 +397,6 @@ public class CollapseManager {
                     center.getX(), center.getY(), center.getZ(), 64.0, level.dimension())),
             packet
         );
-    }
-
-    /**
-     * 批量排入坍方佇列 — 供 Teardown 式增量檢查使用。
-     *
-     * 將一組懸浮方塊加入坍方佇列，分批處理（每 tick MAX_COLLAPSE_PER_TICK 個）。
-     * 會先 Post RStructureCollapseEvent 讓外部模組掛接。
-     *
-     * @param level  世界
-     * @param blocks 需要坍方的方塊位置集合
-     */
-    public static void enqueueCollapse(ServerLevel level, Set<BlockPos> blocks) {
-        if (blocks.isEmpty()) return;
-
-        // Post 事件
-        BlockPos center = blocks.iterator().next();
-        RStructureCollapseEvent event = new RStructureCollapseEvent(level, center, new HashSet<>(blocks));
-        MinecraftForge.EVENT_BUS.post(event);
-
-        // 排入佇列（檢查佇列大小上限）
-        // ★ P2-fix: 佇列滿時不再同步觸發 triggerCollapseAt（會瞬間生成大量 FallingBlockEntity
-        //   導致 TPS 崩潰），改為丟棄溢出部分並延遲到下一 tick 批次處理。
-        int enqueued = 0;
-        int deferred = 0;
-        for (BlockPos pos : blocks) {
-            if (collapseQueue.size() >= BRConfig.getCollapseQueueMaxSize()) {
-                // ★ Audit fix: 放入溢出暫存而非丟棄
-                overflowBuffer.add(new CollapseEntry(level, pos, FailureType.NO_SUPPORT));
-                deferred++;
-            } else {
-                collapseQueue.add(new CollapseEntry(level, pos, FailureType.NO_SUPPORT));
-                enqueued++;
-            }
-        }
-
-        if (deferred > 0) {
-            LOGGER.warn("[Collapse] Queue full ({}), {} blocks to overflow buffer (will retry)",
-                BRConfig.getCollapseQueueMaxSize(), deferred);
-        }
-        LOGGER.info("[Collapse] Batch enqueue: {} queued, {} deferred", enqueued, deferred);
-    }
-
-    /**
-     * Batch-enqueue collapse with an explicit {@link FailureType}.
-     * Used by PFSFEngineInstance for overturning collapses so the failure
-     * type is preserved through the queue and can be read by downstream
-     * systems (e.g. statistics, journal).
-     *
-     * @param level  server level
-     * @param blocks blocks to collapse
-     * @param type   explicit failure type (e.g. {@link FailureType#OVERTURNING})
-     */
-    public static void enqueueCollapse(ServerLevel level, Set<BlockPos> blocks, FailureType type) {
-        if (blocks.isEmpty()) return;
-
-        BlockPos center = blocks.iterator().next();
-        RStructureCollapseEvent event = new RStructureCollapseEvent(level, center, new HashSet<>(blocks));
-        MinecraftForge.EVENT_BUS.post(event);
-
-        int enqueued = 0, deferred = 0;
-        for (BlockPos pos : blocks) {
-            if (collapseQueue.size() >= BRConfig.getCollapseQueueMaxSize()) {
-                overflowBuffer.add(new CollapseEntry(level, pos, type));
-                deferred++;
-            } else {
-                collapseQueue.add(new CollapseEntry(level, pos, type));
-                enqueued++;
-            }
-        }
-
-        if (deferred > 0) {
-            LOGGER.warn("[Collapse] Queue full ({}), {} blocks ({}) to overflow buffer",
-                BRConfig.getCollapseQueueMaxSize(), deferred, type);
-        }
-        LOGGER.info("[Collapse] Batch enqueue ({}): {} queued, {} deferred", type, enqueued, deferred);
     }
 
     /**

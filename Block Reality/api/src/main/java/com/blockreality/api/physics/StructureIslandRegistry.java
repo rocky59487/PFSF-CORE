@@ -254,63 +254,6 @@ public class StructureIslandRegistry {
     }
 
     /**
-     * Reconcile the CPU-side island registry with a single GPU-returned
-     * component record. Used by the PFSF post-fence callback after
-     * {@link com.blockreality.api.physics.pfsf.PFSFLabelPropRecorder}
-     * decodes a {@link com.blockreality.api.physics.pfsf.PFSFLabelPropCpuSimulator.ComponentMeta}
-     * from the summarise readback.
-     *
-     * <p>Scope note: this method handles the "same island fractured into
-     * two or more <b>still-anchored</b> fragments" case — the one the
-     * orphan listener cannot catch because none of the fragments are
-     * orphan. For each GPU-visible component whose block set differs
-     * from the CPU-side island's member set, we split off the excess
-     * members into a new island preserving the PFSF dispatch pipeline
-     * (ALWAYS_DIRTY flag, touch epoch, BFS path untouched for now).
-     *
-     * <p>The current implementation is intentionally conservative: it
-     * only identifies the component (by rootLabel and voxel membership
-     * inferred from the AABB + PFSF-island's base origin); full
-     * subset-upsert logic is left as a safe no-op until
-     * {@code PFSFResultProcessor} actually begins routing events here.
-     * That follows as Phase B.2g once real-hardware tests confirm the
-     * decoded metadata matches what we expect.
-     *
-     * @param hostIslandId original CPU-side island ID that the GPU was
-     *                     solving; GPU does not know about this ID.
-     * @param component    one ComponentMeta record from the summarise
-     *                     readback.
-     * @param voxelIslandOriginX the PFSF island's world origin X.
-     * @param voxelIslandOriginY the PFSF island's world origin Y.
-     * @param voxelIslandOriginZ the PFSF island's world origin Z.
-     * @param epoch         structure epoch to stamp onto any new island.
-     */
-    public static void applyGpuComponent(int hostIslandId,
-                                          com.blockreality.api.physics.pfsf.PFSFLabelPropCpuSimulator.ComponentMeta component,
-                                          int voxelIslandOriginX,
-                                          int voxelIslandOriginY,
-                                          int voxelIslandOriginZ,
-                                          long epoch) {
-        StructureIsland island = islands.get(hostIslandId);
-        if (island == null) return;
-        if (component.blockCount() <= 0) return;
-        // Conservative reconciliation: if the GPU component's block count
-        // equals the CPU island's block count, assume they describe the
-        // same set and only refresh the epoch/dirty flag. Full
-        // member-level reconciliation (splitting multi-component cases)
-        // is deferred until the PFSFResultProcessor wiring is verified
-        // on real hardware.
-        if (component.blockCount() == island.getBlockCount()) {
-            island.touch(epoch);
-            markDirty(hostIslandId);
-            return;
-        }
-        LOGGER.info("[IslandRegistry] GPU reports island {} has {} blocks (CPU tracked {}); reconciliation deferred to Phase B.2g",
-                hostIslandId, component.blockCount(), island.getBlockCount());
-        markDirty(hostIslandId);
-    }
-
-    /**
      * 結構島嶼 — 一組連通的 RBlock。
      */
     public static class StructureIsland {
