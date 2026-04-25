@@ -93,9 +93,6 @@ public class BRConfig {
     /** 掃描邊距 (Scan Margin) 預設格數 */
     public final ForgeConfigSpec.IntValue scanMarginDefault;
 
-    /** ★ T-3: 環路偵測最大追溯深度（LoadPathEngine.wouldCreateCycle） */
-    public final ForgeConfigSpec.IntValue cycleDetectMaxDepth;
-
     // ─── Phase 2: 並行物理引擎參數 ───
 
     /** ★ Phase 2: 物理執行緒數（0 = 自動，使用 availableProcessors - 2） */
@@ -258,10 +255,6 @@ public class BRConfig {
             .comment("Default scan margin for physics analysis (blocks)")
             .defineInRange("scan_margin_default", 4, 0, 16);
 
-        cycleDetectMaxDepth = builder
-            .comment("T-3: Max parent chain depth for cycle detection in support tree (default 8)")
-            .defineInRange("cycle_detect_max_depth", 8, 2, 64);
-
         builder.pop().push("performance");
 
         physicsThreadCount = builder
@@ -273,15 +266,15 @@ public class BRConfig {
             .defineInRange("max_snapshot_blocks", 1048576, 65536, 8388608);
 
         lodFullPrecisionDistance = builder
-            .comment("Phase 4: Maximum distance (blocks) for full precision physics (BeamStress + ForceEquilibrium)")
+            .comment("Phase 4: Maximum distance (blocks) at which the PFSF tier runs full PFSF resolution (FULL tier)")
             .defineInRange("lod_full_precision_distance", 32, 8, 128);
 
         lodStandardDistance = builder
-            .comment("Phase 4: Maximum distance (blocks) for standard precision physics (SupportPathAnalyzer)")
+            .comment("Phase 4: Maximum distance (blocks) at which the PFSF tier runs at standard precision (STANDARD tier)")
             .defineInRange("lod_standard_distance", 96, 32, 256);
 
         lodCoarseDistance = builder
-            .comment("Phase 4: Maximum distance (blocks) for coarse physics (LoadPathEngine only)")
+            .comment("Phase 4: Maximum distance (blocks) at which PFSF runs at coarse precision; beyond this, islands are dormant (COARSE tier)")
             .defineInRange("lod_coarse_distance", 256, 96, 512);
 
         builder.pop().push("svo_optimization");

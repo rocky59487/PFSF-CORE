@@ -8,7 +8,7 @@ import net.minecraftforge.eventbus.api.Event;
  * Stress Update Event — Fired when a block's stress level changes.
  *
  * This event is posted on the FORGE event bus whenever a RBlockEntity's
- * stress level is updated via propagateLoadDown() in LoadPathEngine.
+ * stress level is updated by ResultApplicator (PFSF stress field writeback).
  *
  * Modules can listen to this event to trigger visual effects, update
  * monitoring systems, or perform stress-dependent calculations.

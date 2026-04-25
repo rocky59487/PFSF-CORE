@@ -15,7 +15,7 @@
  * <p>Sprint 4 本包只建立核心基礎設施（bus + 4 event record）。後續 Sprint
  * 以 adapter 模式接入：
  * <ul>
- *   <li>{@code UnionFindEngine} merge/split → publish IslandSplit</li>
+ *   <li>{@code StructureIslandRegistry} merge/split → publish IslandSplit</li>
  *   <li>{@code PFSFFailureRecorder} → publish SupportLost / EdgeFractured</li>
  *   <li>{@code CollapseJournal} → subscribe TopologyEvent 並 append</li>
  *   <li>{@code CollapseManager} → subscribe SupportLost 並進入 collapse queue</li>

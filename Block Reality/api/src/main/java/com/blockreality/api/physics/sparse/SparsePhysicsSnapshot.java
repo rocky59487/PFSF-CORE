@@ -11,7 +11,7 @@ import java.util.Set;
  * SVO 到現有物理引擎的橋接層。
  *
  * 提供與 RWorldSnapshot 完全相容的 API，讓 BFSConnectivityAnalyzer、
- * BeamStressEngine、SupportPathAnalyzer 等現有引擎無需修改即可使用 SVO 資料。
+ * SupportPathAnalyzer 與 PFSF 路徑無需修改即可使用 SVO 資料。
  *
  * 設計策略：
  *   - 小型查詢（< maxSnapshotBlocks）：萃取 SVO 子區域為 RWorldSnapshot（零改動路徑）

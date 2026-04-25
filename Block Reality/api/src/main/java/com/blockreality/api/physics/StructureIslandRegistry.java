@@ -35,7 +35,7 @@ import java.util.function.Function;
  * 設計目標：
  *   1. 放置/破壞時 O(1)~O(K) 增量更新（K = 鄰居數 ≤ 6）
  *   2. 支援跨 chunk 的大型結構（突破 40³ 快照上限）
- *   3. 為並行 PhysicsExecutor 提供獨立工作單元
+ *   3. 為 PFSF GPU 物理引擎提供獨立工作單元
  *
  * 核心概念：
  *   - 每個 RBlock 屬於恰好一個 island

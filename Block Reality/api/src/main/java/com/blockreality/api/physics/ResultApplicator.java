@@ -122,7 +122,7 @@ public class ResultApplicator {
      *
      * 操作：
      *   - stressMap 中每個 pos → setStressLevelBatch(stress)
-     *   - unstableBlocks 中每個 pos → setStressLevelBatch(1.0) + setSupportParent(null)
+     *   - unstableBlocks 中每個 pos → setStressLevelBatch(1.0)
      *   - 批量 flushSync
      *
      * @param level  世界（必須在主執行緒呼叫）
@@ -168,7 +168,6 @@ public class ResultApplicator {
             RBlockEntity rbe = getOrRetry(level, pos, "unstable_mark");
             if (rbe != null) {
                 rbe.setStressLevelBatch(1.0f);
-                rbe.setSupportParent(null);
                 if (batchSet.add(rbe)) {
                     toBatch.add(rbe);
                 }
@@ -250,7 +249,7 @@ public class ResultApplicator {
      *
      * 操作：
      *   - anchoredPositions: pos → setAnchored(true)
-     *   - orphanPositions:   pos → setAnchored(false) + setSupportParent(null) + stress=1.0
+     *   - orphanPositions:   pos → setAnchored(false) + stress=1.0
      *
      * @param level  世界
      * @param result 錨定連通性輸出
@@ -276,7 +275,6 @@ public class ResultApplicator {
             RBlockEntity rbe = getOrRetry(level, pos, "orphan_mark");
             if (rbe != null) {
                 rbe.setAnchored(false);
-                rbe.setSupportParent(null);
                 rbe.setStressLevelBatch(1.0f);
                 toBatch.add(rbe);
                 successCount++;

@@ -12,10 +12,10 @@ import java.util.List;
  * ★ Phase 4: LOD (Level of Detail) 物理系統。
  * 遠離玩家的結構使用低精度引擎，節省 CPU 預算。
  *
- * 各層級對應引擎：
- *   FULL      → PFSF GPU 物理引擎（最高精度）
- *   STANDARD  → SupportPathAnalyzer（加權 BFS，<50ms）
- *   COARSE    → LoadPathEngine（O(H) 樹走訪）
+ * 各層級語意（PFSF GPU 物理引擎根據此 tier 調整每 tick step 數）：
+ *   FULL      → PFSF 全精度（玩家附近）
+ *   STANDARD  → PFSF 標準精度（中距離）
+ *   COARSE    → PFSF 粗略精度（遠距離）
  *   DORMANT   → 不主動計算，僅使用快取結果
  */
 public enum PhysicsTier {

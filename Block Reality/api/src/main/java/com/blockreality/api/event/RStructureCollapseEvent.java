@@ -9,12 +9,11 @@ import java.util.Set;
 /**
  * Block Reality 結構坍方事件。
  *
- * 當 LoadPathEngine 或 SupportPathAnalyzer 判定方塊群失去支撐時，
  * 在 FORGE event bus 上 post 此事件，讓外部模組（CI、視覺效果等）可以掛接。
  *
  * 事件流程：
- *   1. LoadPathEngine.onBlockBrokenCached() 觸發級聯崩塌
- *   2. post RStructureCollapseEvent
+ *   1. PFSF failure_scan 偵測到失效並由 CollapseManager.triggerPFSFCollapse 觸發
+ *   2. post RStructureCollapseEvent（每次崩塌一個方塊，collapsingBlocks 為單元素）
  *   3. CollapseManager 接管視覺效果（粒子、音效）
  */
 public class RStructureCollapseEvent extends Event {

@@ -3,8 +3,8 @@ package com.blockreality.api.physics;
 /**
  * 共用物理常數 — Block Reality 全域統一。
  *
- * ★ review-fix #12: 將散落在 CableNode、ForceEquilibriumSolver 等處的
- * 硬編碼常數提取到單一位置，避免日後調整時遺漏。
+ * 將散落在 RBlockState / ChiselState / StructureRigidBody / OverturningStabilityChecker
+ * 等處的硬編碼常數提取到單一位置，避免日後調整時遺漏。
  */
 public final class PhysicsConstants {
 

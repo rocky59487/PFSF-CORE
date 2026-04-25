@@ -14,8 +14,8 @@ import java.util.UUID;
  * Design rationale (why not Valkyrien Skies / Create approach):
  *   - VS: ship-assembly model — player explicitly designates a structure as a "ship"
  *   - Create: mechanical adhesion — contraptions are intentionally constructed
- *   - Ours: consequence-driven — fragments arise ONLY when ForceEquilibriumSolver /
- *     PFSF engine detects loss of all anchor paths; no player action needed.
+ *   - Ours: consequence-driven — fragments arise ONLY when the PFSF engine
+ *     detects loss of all anchor paths; no player action needed.
  *     This means any player-built structure (ship, vehicle, building) automatically
  *     fragments realistically on failure, with zero extra player effort.
  *

@@ -32,7 +32,6 @@ import java.util.concurrent.ExecutorService;
  *
  *   Phase 2: 延遲填充 — 首次存取 Section 時才讀取 block state
  *            物理引擎觸及某 Section → 觸發 populateSection()
- *            可用 PhysicsExecutor 多執行緒並行填充
  *
  *   Phase 3: 增量同步 — 只更新 dirty sections
  *            ServerTickHandler 收集 BlockEvent → 標記 dirty sections
