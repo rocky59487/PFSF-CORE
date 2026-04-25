@@ -38,7 +38,14 @@ class PFSFStencilConsistencyTest {
     private static final java.util.Set<String> INCLUDE_EXEMPTIONS = java.util.Set.of(
         "stencil_constants.glsl",
         "morton_utils.glsl",
-        "energy_common.glsl"
+        "energy_common.glsl",
+        // Label-propagation shaders 做 BFS 連通分量，不使用 26 連通 Laplacian
+        // (EDGE_P / CORNER_P)。整條 GPU label-prop 路徑已於 PR2 (audit-fixes)
+        // 切離 Java 端 collapse pipeline；shader 本身待後續 PR 一併移除。
+        "label_prop_init.comp.glsl",
+        "label_prop_iterate.comp.glsl",
+        "label_prop_summarise_aggregate.comp.glsl",
+        "label_prop_summarise_alloc.comp.glsl"
     );
 
     @Test

@@ -3,6 +3,7 @@ package com.blockreality.api.physics.pfsf.debug;
 import com.blockreality.api.physics.pfsf.NativePFSFBridge;
 import com.blockreality.api.physics.pfsf.NativePFSFRuntime;
 import com.blockreality.api.physics.pfsf.IPFSFRuntime;
+import com.blockreality.api.physics.pfsf.VulkanComputeContext;
 import org.junit.jupiter.api.*;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -39,6 +40,14 @@ class L6_InGamePipelineTest {
                 "libblockreality_pfsf not loaded — L0 must pass first");
         assumeTrue(NativePFSFRuntime.areKernelsPorted(),
                 "KERNELS_PORTED=false — set it to true in NativePFSFRuntime.java:31");
+        // L6-03 asserts RuntimeView.isAvailable() which is gated on
+        // VulkanComputeContext.isAvailable() (no-fallback contract: native
+        // runtime borrows Vulkan handles from the Java side). Tests must
+        // initialize the Java Vulkan context before asserting availability.
+        VulkanComputeContext.init();
+        assumeTrue(VulkanComputeContext.isAvailable(),
+                "VulkanComputeContext init failed — Java-side Vulkan compute unavailable. "
+                        + "Driver / GPU may not support compute, or LWJGL Vulkan loader is missing.");
     }
 
     @AfterAll
@@ -46,6 +55,7 @@ class L6_InGamePipelineTest {
         if (NativePFSFRuntime.isActive()) {
             NativePFSFRuntime.shutdown();
         }
+        VulkanComputeContext.shutdown();
     }
 
     @Test
