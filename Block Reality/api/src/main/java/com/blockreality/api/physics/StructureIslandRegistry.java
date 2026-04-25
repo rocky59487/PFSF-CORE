@@ -1069,7 +1069,12 @@ public class StructureIslandRegistry {
                                      @Nullable ServerLevel level) {
         Consumer<OrphanIslandEvent> listener = orphanListener;
         if (listener == null) {
-            LOGGER.warn("[IslandRegistry] Orphan island {} ({} blocks) detected but no listener installed; blocks may stay suspended until PFSF phi diverges",
+            // No-fallback contract: production has no orphan listener. Topology
+            // BFS still runs (its dirty-region tracking serves other purposes)
+            // but the result is dropped — orphan detection now happens on the
+            // GPU via failure_scan's φ_orphan threshold. Logged at debug only;
+            // in production every fracture would otherwise spam this line.
+            LOGGER.debug("[IslandRegistry] Orphan island {} ({} blocks) detected; PFSF will collapse via φ divergence",
                     islandId, members.size());
             return;
         }
