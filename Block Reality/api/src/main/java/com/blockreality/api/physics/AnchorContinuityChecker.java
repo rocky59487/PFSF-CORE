@@ -140,13 +140,24 @@ public class AnchorContinuityChecker implements IAnchorChecker {
             return true;
         }
 
-        // Treat contact with a sturdy non-physics world block as a natural
-        // foundation. This covers the common case where RBlocks are built on
-        // terrain rather than directly on bedrock.
-        for (Direction dir : ALL_DIRS) {
-            if (hasStableExternalSupport(level, pos, dir)) {
-                return true;
-            }
+        // Treat contact with a sturdy non-physics world block BELOW as a
+        // natural foundation. This covers the common case where RBlocks are
+        // built on terrain rather than directly on bedrock.
+        //
+        // Only DOWN counts: gravity pulls down, so structural support comes
+        // from below. Lateral contact (an RBlock placed next to a hill) does
+        // NOT anchor — there is no friction or adhesion model. Contact from
+        // above (a "stalactite" hanging from terrain) likewise does not hold
+        // a block up.
+        //
+        // The previous version walked all 6 directions. For a horizontal
+        // cantilever built near terrain, every block whose 6-neighbourhood
+        // happened to clip grass/dirt became a "natural anchor" —
+        // failure_scan and SupportPathAnalyzer both skipped them, so only
+        // the literal tip extending past terrain ever fell, and the cantilever
+        // appeared to "shed" one block at a time instead of breaking.
+        if (hasStableExternalSupport(level, pos, Direction.DOWN)) {
+            return true;
         }
 
         return false;
