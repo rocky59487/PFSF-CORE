@@ -274,162 +274,65 @@ public final class PFSFScheduler {
      * @return true 若偵測到發散/振盪並已重啟
      */
     public static boolean checkDivergence(PFSFIslandBuffer buf, float maxPhiNow) {
-        if (NativePFSFBridge.hasComputeV4()) {
-            try {
-                // Pack buf scheduler state into the int[7] ABI view that the
-                // C ABI expects. Float slots round-trip through raw bits so
-                // we don't need a DirectByteBuffer for 28 bytes of scratch.
-                int[] state = new int[7];
-                state[0] = 28;                                              // struct_bytes
-                state[1] = Float.floatToRawIntBits(buf.maxPhiPrev);
-                state[2] = Float.floatToRawIntBits(buf.maxPhiPrevPrev);
-                state[3] = buf.oscillationCount;
-                state[4] = buf.dampingActive ? 1 : 0;
-                state[5] = buf.chebyshevIter;
-                state[6] = Float.floatToRawIntBits(buf.prevMaxMacroResidual);
-
-                int kind = NativePFSFBridge.nativeCheckDivergence(
-                        state,
-                        maxPhiNow,
-                        buf.cachedMacroResiduals,
-                        DIVERGENCE_RATIO,
-                        DAMPING_SETTLE_THRESHOLD);
-
-                // Unpack mutated state back into buf.
-                buf.maxPhiPrev            = Float.intBitsToFloat(state[1]);
-                buf.maxPhiPrevPrev        = Float.intBitsToFloat(state[2]);
-                buf.oscillationCount      = state[3];
-                buf.dampingActive         = state[4] != 0;
-                buf.chebyshevIter         = state[5];
-                buf.prevMaxMacroResidual  = Float.intBitsToFloat(state[6]);
-
-                // Logging parity with the Java ref — native stays silent so
-                // the island-id / values formatting stays on this side.
-                switch (kind) {
-                    case NativePFSFBridge.DivergenceKind.NAN_INF:
-                        LOGGER.error("[PFSF] NaN/Inf detected on island {}! Emergency reset + damping enabled.",
-                                buf.getIslandId());
-                        break;
-                    case NativePFSFBridge.DivergenceKind.RAPID_GROWTH:
-                        LOGGER.warn("[PFSF] Divergence on island {} (phi: {} → {}), resetting Chebyshev",
-                                buf.getIslandId(), buf.maxPhiPrevPrev, buf.maxPhiPrev);
-                        break;
-                    case NativePFSFBridge.DivergenceKind.OSCILLATION:
-                        LOGGER.warn("[PFSF] Oscillation on island {} enabling damping",
-                                buf.getIslandId());
-                        break;
-                    case NativePFSFBridge.DivergenceKind.PERSISTENT_OSC:
-                        LOGGER.warn("[PFSF] Persistent oscillation on island {}", buf.getIslandId());
-                        break;
-                    case NativePFSFBridge.DivergenceKind.MACRO_REGION:
-                        LOGGER.warn("[PFSF] Localized divergence on island {} (macro residual {})",
-                                buf.getIslandId(), buf.prevMaxMacroResidual);
-                        break;
-                    default:
-                        // converging — no log
-                        break;
-                }
-                return kind != NativePFSFBridge.DivergenceKind.NONE;
-            } catch (UnsatisfiedLinkError e) {
-                // fall through.
-            }
-        }
+        // No-fallback contract: the native divergence kernel was removed
+        // from the dispatch path. C++ flagged rapid-growth and oscillation
+        // in addition to NaN/Inf, and on those branches set dampingActive=1
+        // — which the smoothing shaders read as a 0.995× φ multiplier per
+        // step, pinning φ below the orphan threshold. We always go through
+        // the Java reference now, which only reacts to NaN/Inf so degenerate
+        // islands can grow φ to 1e6 and failure_scan can fire NO_SUPPORT.
         return checkDivergenceJavaRef(buf, maxPhiNow);
     }
 
     /**
-     * Java reference implementation — never deleted (golden-vector oracle).
-     * Bit-exact mirror of the pre-v0.3d implementation; the native path
-     * above must match this behaviour.
+     * No-fallback divergence detection.
+     *
+     * <p>The previous implementation watched φ growth tick-over-tick and, on
+     * any of three triggers (1.5× growth, oscillation, macro-block residual
+     * spike) reset Chebyshev acceleration AND enabled the 0.995× damping
+     * factor that the smoothing shaders apply per-step. That damping is
+     * exactly what blocked legitimate orphan detection: an island with no
+     * Dirichlet boundary has a degenerate Poisson system and φ MUST grow
+     * unbounded — but the moment it grew "too fast" the babysitter pinned
+     * it at φ_eq ≈ source/(1−0.995) ≈ 200·source, far below the
+     * φ_orphan = 1e6 threshold failure_scan checks. Result: floating
+     * islands never collapsed via PFSF.
+     *
+     * <p>What stays: NaN/Inf detection. That is a real numerical fault
+     * (overflow, divide-by-zero in the solver) and must reset state to
+     * avoid propagating garbage into the next tick.
+     *
+     * <p>What is gone: every "I think the solver is going too fast" check.
+     * Genuine instability for well-posed islands is now exposed as drift
+     * over many ticks, but failure_scan's φ_orphan threshold catches
+     * runaway divergence anyway. The user-visible effect is that orphan
+     * islands take a few seconds to reach 1e6 instead of being clamped
+     * forever — exactly what was wanted.
      */
     static boolean checkDivergenceJavaRef(PFSFIslandBuffer buf, float maxPhiNow) {
-        float prev = buf.maxPhiPrev;
-        float prevPrev = buf.maxPhiPrevPrev;
-
-        // D4+M5-fix: NaN 偵測 — 重置 Chebyshev 並啟用 damping，但保留 prev 歷史
         if (Float.isNaN(maxPhiNow) || Float.isInfinite(maxPhiNow)) {
             buf.chebyshevIter = 0;
-            buf.dampingActive = true;
-            LOGGER.error("[PFSF] NaN/Inf detected on island {}! Emergency reset + damping enabled.",
+            // dampingActive stays false — even NaN/Inf no longer pulls
+            // damping in. Recovery is "reset Chebyshev and continue" so
+            // the orphan threshold can still be reached on the next pass.
+            LOGGER.error("[PFSF] NaN/Inf detected on island {}; resetting Chebyshev",
                     buf.getIslandId());
-            // M5-fix: 不重置 prev 為 0（會干擾後續 divergence 判定），
-            // 改為標記為「上次是 NaN」讓下一次比對跳過
             buf.maxPhiPrevPrev = buf.maxPhiPrev;
-            buf.maxPhiPrev = -1.0f;  // 特殊標記：-1 表示上一次是 NaN
+            buf.maxPhiPrev = -1.0f;
             return true;
         }
 
-        // M5-fix: 跳過 NaN 後的第一次比對
-        if (prev < 0) {
+        // Skip first compare after a NaN reset.
+        if (buf.maxPhiPrev < 0) {
             buf.maxPhiPrevPrev = 0;
             buf.maxPhiPrev = maxPhiNow;
             return false;
         }
 
-        // Check 1: 急遽成長（原有邏輯）
-        if (prev > 0 && maxPhiNow > prev * DIVERGENCE_RATIO) {
-            buf.chebyshevIter = 0;
-            LOGGER.warn("[PFSF] Divergence on island {} (phi: {} → {}), resetting Chebyshev",
-                    buf.getIslandId(), prev, maxPhiNow);
-            buf.maxPhiPrevPrev = prev;
-            buf.maxPhiPrev = maxPhiNow;
-            return true;
-        }
-
-        // C5-fix: Check 2: 振盪偵測（增→減→增 or 減→增→減）
-        if (prevPrev > 0 && prev > 0 && maxPhiNow > 0) {
-            boolean wasGrowing = prev > prevPrev;
-            boolean isGrowing = maxPhiNow > prev;
-            boolean oscillating = wasGrowing != isGrowing;  // 方向改變
-
-            if (oscillating) {
-                buf.oscillationCount++;
-            } else {
-                buf.oscillationCount = 0;
-            }
-
-            float amplitude = Math.abs(maxPhiNow - prev) / prev;
-            // Check 2a: 短期振盪（原始邏輯）— 幅度 > 10%
-            if (oscillating && amplitude > 0.10f) {
-                buf.chebyshevIter = 0;
-                buf.dampingActive = true;
-                LOGGER.warn("[PFSF] Oscillation on island {} (amplitude {}), enabling damping",
-                        buf.getIslandId(), amplitude);
-                buf.maxPhiPrevPrev = prev;
-                buf.maxPhiPrev = maxPhiNow;
-                return true;
-            }
-            // Check 2b: 持續低幅振盪（新增）— 連續 5+ tick 方向交替
-            if (buf.oscillationCount >= 5 && amplitude > 0.02f) {
-                buf.chebyshevIter = 0;
-                buf.dampingActive = true;
-                LOGGER.warn("[PFSF] Persistent oscillation on island {} ({} ticks, amplitude {})",
-                        buf.getIslandId(), buf.oscillationCount, amplitude);
-                buf.oscillationCount = 0;
-                buf.maxPhiPrevPrev = prev;
-                buf.maxPhiPrev = maxPhiNow;
-                return true;
-            }
-        }
-
-        // Check 3（新增）: Macro-block 區域發散偵測
-        // 全域 maxPhi 穩定但某區域殘差急遽成長 → 局部發散
-        if (buf.cachedMacroResiduals != null && buf.prevMaxMacroResidual > 0) {
-            float maxResidual = 0;
-            for (float r : buf.cachedMacroResiduals) {
-                if (r > maxResidual) maxResidual = r;
-            }
-            if (maxResidual > buf.prevMaxMacroResidual * 2.0f) {
-                buf.chebyshevIter = 0;
-                LOGGER.warn("[PFSF] Localized divergence on island {} (macro residual: {} → {})",
-                        buf.getIslandId(), buf.prevMaxMacroResidual, maxResidual);
-                buf.prevMaxMacroResidual = maxResidual;
-                buf.maxPhiPrevPrev = prev;
-                buf.maxPhiPrev = maxPhiNow;
-                return true;
-            }
-            buf.prevMaxMacroResidual = maxResidual;
-        } else if (buf.cachedMacroResiduals != null) {
+        // Update macro-residual tracker so adaptive-step heuristics in
+        // PFSFEngineInstance.computeAdjustedSteps still have data, but do
+        // NOT use it as a divergence trigger.
+        if (buf.cachedMacroResiduals != null) {
             float maxResidual = 0;
             for (float r : buf.cachedMacroResiduals) {
                 if (r > maxResidual) maxResidual = r;
@@ -437,20 +340,12 @@ public final class PFSFScheduler {
             buf.prevMaxMacroResidual = maxResidual;
         }
 
-        // M1-fix: 穩定後關閉 damping（連續 3 tick 變化 < 1%）
-        if (buf.dampingActive && prev > 0) {
-            float change = Math.abs(maxPhiNow - prev) / prev;
-            if (change < DAMPING_SETTLE_THRESHOLD) {
-                buf.dampingActive = false;
-            }
-        }
-
-        buf.maxPhiPrevPrev = prev;
+        buf.maxPhiPrevPrev = buf.maxPhiPrev;
         buf.maxPhiPrev = maxPhiNow;
         return false;
     }
 
-    // ═════════════════════════════════════════��═════════════════════
+    // ═══════════════════════════════════════════════════════════════
     //  v2: Macro-block 自適應迭代（靜止結構省 90% ALU）
     // ═══════════════════════════════════════════════════════════════
 
