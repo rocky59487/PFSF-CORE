@@ -72,6 +72,12 @@ public final class PFSFEngine {
     }
 
     public static boolean isAvailable() {
+        // No-fallback contract: every solver path (Java GPU, native runtime)
+        // requires Vulkan compute. Returning true without Vulkan would let
+        // ServerTickHandler call onServerTick() on an engine that does
+        // nothing, and the user would have no way to know physics is silently
+        // dead. Gate on VulkanComputeContext explicitly.
+        if (!VulkanComputeContext.isAvailable()) return false;
         return NativePFSFRuntime.asRuntime().isAvailable()
                 || (instance != null && instance.isAvailable());
     }
