@@ -142,7 +142,8 @@ public class BlockRealityMod {
     @SubscribeEvent
     public void onRegisterCommands(RegisterCommandsEvent event) {
         BrCommand.register(event.getDispatcher());
-        LOGGER.info("[BlockReality] 已註冊指令: /br (toggle|status|vulkan_test)");
+        com.blockreality.api.command.StressAnalysisCommand.register(event.getDispatcher());
+        LOGGER.info("[BlockReality] 已註冊指令: /br (toggle|status|vulkan_test), /br_stress");
 
         // ★ Register commands from all modules
         for (var provider : ModuleRegistry.getCommandProviders()) {
