@@ -120,8 +120,14 @@ class L1_Phase1PrimitivesTest {
     // ─── Wind bias ────────────────────────────────────────────────────────────
 
     @Test
-    @DisplayName("L1-06: applyWindBias 修改 conductivity（不全為原始值）")
-    void applyWindBiasModifiesConductivity() {
+    @DisplayName("L1-06: applyWindBias 為刻意 no-op（保持矩陣 A 對稱性）")
+    void applyWindBiasIsIntentionalNoOp() {
+        // Production contract (L1-native/libpfsf/src/compute/wind_bias.cpp):
+        // pfsf_apply_wind_bias was changed to a no-op because asymmetric
+        // upwind bias broke the system matrix A's symmetry, destabilising
+        // PCG. Wind pressure is now applied via the source term, not by
+        // modifying conductivity. The C symbol is retained for ABI
+        // compatibility but must leave the conductivity array untouched.
         int N = 8;
         float[] cond = new float[6 * N];
         for (int i = 0; i < 6 * N; i++) cond[i] = 1.0f;
@@ -130,13 +136,10 @@ class L1_Phase1PrimitivesTest {
         assertDoesNotThrow(() ->
                 NativePFSFBridge.nativeApplyWindBias(cond, N, 1.0f, 0.0f, 0.0f, 1.5f));
 
-        boolean anyChanged = false;
         for (int i = 0; i < 6 * N; i++) {
-            if (Math.abs(cond[i] - original[i]) > 1e-6f) {
-                anyChanged = true;
-                break;
-            }
+            assertEquals(original[i], cond[i], 0.0f,
+                    "applyWindBias must leave conductivity unchanged (no-op contract); "
+                            + "entry " + i + " was mutated. See L1-native/libpfsf/src/compute/wind_bias.cpp.");
         }
-        assertTrue(anyChanged, "applyWindBias must modify at least one conductivity entry");
     }
 }
