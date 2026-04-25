@@ -59,35 +59,21 @@ public final class PFSFDataBuilder {
             return;
         }
 
-        // v3: BFS 快取 — 拓撲未變時跳過昂貴的 BFS 計算
-        Map<BlockPos, Integer> armMap;
-        Map<BlockPos, Double> archFactorMap;
-        if (buf.isBfsCacheValid()) {
-            // 快取命中：重用上次的 BFS 結果
-            armMap = new java.util.HashMap<>();
-            for (var e : buf.getCachedArmMap().entrySet()) armMap.put(e.getKey(), e.getValue());
-            archFactorMap = new java.util.HashMap<>();
-            for (var e : buf.getCachedArchFactorMap().entrySet()) archFactorMap.put(e.getKey(), e.getValue().doubleValue());
-        } else {
-            // 快取未命中：完整 BFS
-            armMap = PFSFSourceBuilder.computeHorizontalArmMap(members, anchors);
-            archFactorMap = PFSFSourceBuilder.computeArchFactorMap(members, anchors);
-            // 存入快取
-            buf.setCachedArmMap(new java.util.HashMap<>(armMap));
-            java.util.Map<BlockPos, Float> archFloat = new java.util.HashMap<>();
-            for (var e : archFactorMap.entrySet()) archFloat.put(e.getKey(), e.getValue().floatValue());
-            buf.setCachedArchFactorMap(archFloat);
-        }
-
-        // v2: 風壓配置
+        // No-fallback contract: arm map / arch factor / Timoshenko moment
+        // factor were geometric pre-computations used to amplify the source
+        // term and lower maxPhi for blocks the BFS thought were "cantilever
+        // tips". They were a guess made to break a cantilever before the
+        // Poisson solver finished — i.e. before the GPU could see the
+        // actual stress field. With those pre-amplifications the failure
+        // signal was driven by graph topology, not by σ·∇φ.
+        //
+        // Removed. PFSF now solves on the raw self-weight source; failure_scan
+        // compares flux_in/flux_out to rcomp/rtens directly, and orphan
+        // detection uses the φ_orphan threshold instead of an arm-derived
+        // maxPhi. Cantilevers fail when the load they have to drain into the
+        // anchor exceeds the connection's compressive/tensile capacity —
+        // physics, not heuristics.
         float windSpeed = com.blockreality.api.config.BRConfig.getWindSpeed();
-
-        // v2: Timoshenko — per-column section height map
-        java.util.Map<Long, Integer> sectionHeightMap = new java.util.HashMap<>();
-        for (BlockPos pos : members) {
-            long colKey = ((long) pos.getX() << 32) | (pos.getZ() & 0xFFFFFFFFL);
-            sectionHeightMap.merge(colKey, 1, Integer::sum);
-        }
 
         int N = buf.getN();
         float[] source       = new float[N];
@@ -106,25 +92,17 @@ public final class PFSFDataBuilder {
             if (mat == null) continue;
 
             float fillRatio = fillRatioLookup != null ? fillRatioLookup.apply(pos) : 1.0f;
-            int arm = armMap.getOrDefault(pos, 0);
-            double archFactor = archFactorMap.getOrDefault(pos, 0.0);
 
-            // v2.1: 固化時間效應（Bažant 1989 MPS）
+            // v2.1: 固化時間效應（Bažant 1989 MPS）— hydration 仍透過 σ 縮放影響求解，
+            // 但已不參與 maxPhi 計算（Timoshenko 啟發式被刪掉）。
             float hDeg = (curingLookup != null) ? Math.max(0.0f, Math.min(1.0f, curingLookup.apply(pos))) : 1.0f;
             hydration[i] = hDeg;
             float sigmaScale = (float) Math.sqrt(hDeg);
-            float gcScale    = (float) Math.pow(hDeg, 1.5);
 
-            // v2: Timoshenko 力矩修正（取代舊 α/β 經驗常數）
-            long colKey = ((long) pos.getX() << 32) | (pos.getZ() & 0xFFFFFFFFL);
-            float sectionHeight = sectionHeightMap.getOrDefault(colKey, 1).floatValue();
-            float momentFactor = PFSFSourceBuilder.computeTimoshenkoMomentFactor(
-                    1.0f, sectionHeight, arm,
-                    (float) mat.getYoungsModulusGPa(),
-                    PFSFConstants.DEFAULT_POISSON_RATIO);
+            // 純自重 source（沒有 momentFactor 放大）。剛性與 anchor 路徑由 PDE 自己解出。
             float baseWeight = (float) (mat.getDensity() * fillRatio
                     * PFSFConstants.GRAVITY * PFSFConstants.BLOCK_VOLUME);
-            source[i] = baseWeight * momentFactor;
+            source[i] = baseWeight;
 
             // 流體壓力耦合：將流體邊界力疊加到結構 source 項
             // 單位一致（均為 N），正規化由下方 sigmaMax 統一處理
@@ -136,8 +114,10 @@ public final class PFSFDataBuilder {
             }
 
             type[i]   = anchors.contains(pos) ? VOXEL_ANCHOR : VOXEL_SOLID;
-            // maxPhi 反映 G_c（gcScale）影響：養護不足 → maxPhi 降低 → 更容易斷裂
-            maxPhi[i] = PFSFSourceBuilder.computeMaxPhiTimoshenko(mat, arm, sectionHeight) * gcScale;
+            // maxPhi 不再驅動失效 — failure_scan 只剩 φ_orphan + flux 比較。
+            // buffer 仍然 bind 是為了向下相容 shader binding layout；填入 +∞，
+            // 即使有舊 shader 殘留 `p > maxPhi` 檢查也不會誤觸。
+            maxPhi[i] = Float.POSITIVE_INFINITY;
             rcomp[i]  = (float) mat.getRcomp();
             rtens[i]  = (float) mat.getRtens();
 
@@ -145,11 +125,9 @@ public final class PFSFDataBuilder {
                 BlockPos nb = pos.relative(dir);
                 RMaterial nbMat = members.contains(nb) && materialLookup != null
                         ? materialLookup.apply(nb) : null;
-                int armNb = armMap.getOrDefault(nb, 0);
                 int dirIdx = PFSFConductivity.dirToIndex(dir);
-                // v2.1: upwind conductivity bias（取代 v2 的 WIND_CONDUCTIVITY_DECAY 硬截斷）
-                float sigma = PFSFConductivity.sigma(mat, nbMat, dir, arm, armNb, windVec);
-                // 養護度縮放（水化不足的體素傳導率較低）
+                // arm 不再參與 σ — 之前的 distance decay 也是啟發式，刪掉。
+                float sigma = PFSFConductivity.sigma(mat, nbMat, dir, 0, 0, windVec);
                 conductivity[dirIdx * N + i] = sigma * sigmaScale;
             }
         }
