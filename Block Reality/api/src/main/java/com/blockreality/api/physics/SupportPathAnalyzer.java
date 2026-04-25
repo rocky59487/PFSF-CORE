@@ -421,19 +421,17 @@ public class SupportPathAnalyzer {
     // ═══════════════════════════════════════════════════════
 
     /**
-     * 判定是否為錨定點。
-     * 統一委託 AnchorContinuityChecker.isNaturalAnchor()，
-     * 再加上 RBlockEntity.isAnchored() 的手動標記。
+     * 純委託 AnchorContinuityChecker.isNaturalAnchor() — 純幾何，由當下世界狀態決定。
+     *
+     * 之前 fallback 到 RBlockEntity.isAnchored() (NBT 持久化欄位) 是個陷阱：
+     * ResultApplicator 在某次連通性分析後寫入 isAnchored=true，之後即使地形被挖、
+     * AnchorContinuityChecker 改回 false，那個 boolean 仍然是 true，永遠不會被 clear。
+     * 挖掉支撐後懸臂只掉末端一塊的症狀就是這個 stale flag — 整段懸臂仍被當成 anchor。
+     *
+     * 現在無 fallback：anchor = 當下幾何判定，每次重算。
      */
     private static boolean isAnchor(ServerLevel level, BlockPos pos, BlockState state) {
-        // 統一錨定判斷（基岩/屏障/底層/ANCHOR_PILE）
-        if (AnchorContinuityChecker.isNaturalAnchor(level, pos)) return true;
-
-        // RBlock 手動標記為錨定（可能由 ResultApplicator 寫入）
-        BlockEntity be = level.getBlockEntity(pos);
-        if (be instanceof RBlockEntity rbe && rbe.isAnchored()) return true;
-
-        return false;
+        return AnchorContinuityChecker.isNaturalAnchor(level, pos);
     }
 
     /**

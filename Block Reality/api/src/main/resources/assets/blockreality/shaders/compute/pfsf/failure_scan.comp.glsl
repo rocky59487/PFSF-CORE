@@ -44,9 +44,15 @@ void main() {
 
     float p = phi[i];
 
-    // ─── Cantilever / Orphan ───
-    if (p > maxPhi[i]) {
-        fail_flags[i] = (p > pc.phi_orphan) ? 3u : 1u;
+    // ─── Orphan: φ blows up when no anchor path can drain the source. ───
+    // The previous "cantilever" branch (`p > maxPhi[i]`) was a Timoshenko
+    // moment heuristic computed on a horizontal-arm BFS — a guess made to
+    // pre-empt the iterative solver. It conflicted with pure stress
+    // detection (every block an arm-BFS could not reach was promoted to
+    // its own anchor and then trivially "passed" the maxPhi check).
+    // Removed; the crush / tension checks below are the actual physics.
+    if (p > pc.phi_orphan) {
+        fail_flags[i] = 3u;  // FAIL_NO_SUPPORT
         return;
     }
 
