@@ -58,6 +58,18 @@ public class ClientSetup {
         event.register(STRESS_OVERLAY_KEY);
     }
 
+    /**
+     * MOD bus: 註冊實體渲染器。
+     *
+     * STRUCTURE_FRAGMENT 必須有 renderer 實例，否則 EntityRenderDispatcher.shouldRender
+     * 會在 spawn packet 抵達 client 時 NPE，導致渲染執行緒崩潰（整個遊戲 crash）。
+     */
+    @SubscribeEvent
+    public static void onRegisterEntityRenderers(EntityRenderersEvent.RegisterRenderers event) {
+        event.registerEntityRenderer(BREntities.STRUCTURE_FRAGMENT.get(),
+                StructureFragmentRenderer::new);
+    }
+
 
     /**
      * 初始化 FORGE bus 的客戶端事件監聽。
