@@ -79,8 +79,8 @@ public class BrCommand {
                     long epoch = ConnectivityCache.getStructureEpoch();
                     String cacheStats = ConnectivityCache.getCacheStats();
 
-                    // Registry / anchor / topology counts — these are
-                    // the "is physics actually seeing anything" signals.
+                    // Registry / anchor counts — these are the
+                    // "is physics actually seeing anything" signals.
                     // If registered == 0 the whole stack can be green
                     // but nothing is being simulated, which is the
                     // silent-failure mode we most want to surface.
@@ -90,8 +90,6 @@ public class BrCommand {
                             com.blockreality.api.physics.StructureIslandRegistry.getIslandCount();
                     int anchorCount =
                             com.blockreality.api.physics.StructureIslandRegistry.getAnchorCount();
-                    long topologyTick =
-                            com.blockreality.api.physics.StructureIslandRegistry.getTopologyTick();
                     boolean pnsmOn = BRConfig.isPNSMShadowEnabled();
                     int pnsmLeaves = pnsmOn
                             ? com.blockreality.api.physics.pnsm.PNSMShadow.leafCount()
@@ -122,8 +120,6 @@ public class BrCommand {
                         .withStyle(registered > 0
                                 ? (anchorCount > 0 ? ChatFormatting.GREEN : ChatFormatting.YELLOW)
                                 : ChatFormatting.GRAY), false);
-                    src.sendSuccess(() -> Component.literal("  Topology tick: " + topologyTick)
-                        .withStyle(ChatFormatting.GRAY), false);
                     if (pnsmOn) {
                         src.sendSuccess(() -> Component.literal(
                                 "  PNSM shadow: leaves=" + pnsmLeaves + " mutations=" + pnsmMuts)

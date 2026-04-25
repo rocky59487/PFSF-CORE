@@ -85,17 +85,6 @@ public class ServerTickHandler {
         // P2-C: 批次 BFS — 將同 tick 所有方塊破壞合併，每 island 只做一次連通性檢查
         StructureIslandRegistry.flushDestructions();
 
-        // Topology v2: advance the ThreeTierOrchestrator once per tick.
-        // Runs Elder Rule component tracking and fires orphan events
-        // for any island that lost anchor connectivity this tick. The
-        // registry's internal OrphanSink bridges back into the existing
-        // OrphanIslandEvent pipeline so CollapseManager sees the same
-        // event shape it always has.
-        {
-            long topoEpoch = ConnectivityCache.getStructureEpoch();
-            StructureIslandRegistry.advanceTopology(topoEpoch);
-        }
-
         // ═══ PFSF GPU 物理引擎 ═══
         if (BRConfig.isPFSFEnabled() && PFSFEngine.isAvailable()) {
             java.util.List<net.minecraft.server.level.ServerPlayer> players =

@@ -5,8 +5,6 @@ import com.blockreality.api.material.DefaultMaterial;
 import com.blockreality.api.material.RMaterial;
 import com.blockreality.api.physics.PhysicsConstants;
 import com.blockreality.api.physics.pfsf.LabelPropagation;
-import com.blockreality.api.physics.topology.ThreeTierOrchestrator;
-import com.blockreality.api.physics.topology.TopologicalSVDAG;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
@@ -26,7 +24,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Consumer;
 import java.util.function.Function;
 
 /**
@@ -68,157 +65,9 @@ public class StructureIslandRegistry {
      */
     private static final Set<BlockPos> anchorBlocks = ConcurrentHashMap.newKeySet();
 
-    /**
-     * Logged once per JVM when {@link #orphanClassificationEnabled}
-     * first observes an empty anchor set. Codex review on the initial
-     * land of this classifier flagged (P0) that
-     * {@link #registerAnchor} is only ever called from tests, so in
-     * production {@link #anchorBlocks} stays empty and every fractured
-     * component would be treated as orphan. The safety valve below
-     * keeps {@code notifyOrphan} silent until anchor registration is
-     * wired from the natural-anchor flow; the rewrite under
-     * {@code physics/topology/} supersedes this code path entirely but
-     * the valve protects today's production builds in the meantime.
-     */
-    private static final java.util.concurrent.atomic.AtomicBoolean SAFETY_VALVE_LOGGED =
-            new java.util.concurrent.atomic.AtomicBoolean(false);
-
-    /**
-     * Split 後產生、無任何錨點連通的新 island 會透過此 listener 通知。
-     * 實務上由 {@code CollapseManager} 安裝，立即整個拆除該 island。
-     * 若未安裝（如單元測試情境），不會有任何副作用，僅記錄 WARN log。
-     */
-    @Nullable
-    private static volatile Consumer<OrphanIslandEvent> orphanListener = null;
-
-    // ═══════════════════════════════════════════════════════════════
-    //  Topology v2: 正式上線 ThreeTierOrchestrator
-    // ═══════════════════════════════════════════════════════════════
-    // The safety-valve in orphanClassificationEnabled() has been keeping
-    // orphan detection off in production because anchorBlocks is empty.
-    // The topology/ rewrite solves this properly with Elder Rule identity
-    // and anchor-aware BFS; we mirror every register/unregister into it
-    // here and route its orphan events back through orphanListener so
-    // existing subscribers (CollapseManager) see the same OrphanIslandEvent
-    // shape. GPU int-id plumbing is untouched — the orchestrator only
-    // informs orphan decisions, it does not re-own the int-id registry.
-    private static final ThreeTierOrchestrator topology = createTopology();
-
-    /**
-     * Elder-Rule fingerprint → legacy int islandId. Populated each tick
-     * by {@link #advanceTopology(long)} from the orchestrator's
-     * component bindings. Queryable from any thread; updates happen
-     * only on the server tick thread.
-     */
-    private static final ConcurrentHashMap<Long, Integer> fingerprintToIntId = new ConcurrentHashMap<>();
-    /** Reverse: int islandId → last seen Elder-Rule fingerprint. */
-    private static final ConcurrentHashMap<Integer, Long> intIdToFingerprint = new ConcurrentHashMap<>();
-
-    private static ThreeTierOrchestrator createTopology() {
-        ThreeTierOrchestrator t = new ThreeTierOrchestrator();
-        t.setOrphanSink(event -> {
-            // Map new-system orphan voxels to the int-id the rest of the
-            // engine (GPU, CollapseManager subscribers) speaks. We look up
-            // the int island by any voxel in the orphan set; all members
-            // share the same int id because the CPU-side BFS always keeps
-            // blockToIsland coherent before this sink runs.
-            Set<BlockPos> voxels = event.voxels();
-            if (voxels.isEmpty()) return;
-            int islandId = -1;
-            for (BlockPos p : voxels) {
-                Integer id = blockToIsland.get(p);
-                if (id != null) { islandId = id; break; }
-            }
-            if (islandId < 0) {
-                // Voxels are known to the orchestrator but not the int
-                // registry — race between tick() and a concurrent
-                // unregister that already removed them. Ignore; next
-                // tick will reconcile.
-                return;
-            }
-            long epoch = ConnectivityCache.getStructureEpoch();
-            notifyOrphan(islandId, voxels, epoch, null);
-        });
-        return t;
-    }
-
-    /** Accessor for tests and advanced diagnostics. */
-    public static ThreeTierOrchestrator getTopology() { return topology; }
-
-    /**
-     * Look up the Elder-Rule-stable fingerprint for a legacy int
-     * island id. Returns {@code 0L} when the island has not yet been
-     * reconciled (first tick not yet run) or has been destroyed.
-     * Downstream systems that want ID stability across split/merge —
-     * collapse journaling, persistence checkpoints, test oracles —
-     * should key on this value rather than the int id.
-     */
-    public static long getStableFingerprint(int islandId) {
-        Long fp = intIdToFingerprint.get(islandId);
-        return fp != null ? fp : 0L;
-    }
-
-    /**
-     * Reverse lookup: find the current int island id that represents
-     * the component with the given Elder-Rule fingerprint. Returns
-     * {@code -1} when the fingerprint is unknown.
-     */
-    public static int getIslandIdByFingerprint(long fingerprint) {
-        Integer id = fingerprintToIntId.get(fingerprint);
-        return id != null ? id : -1;
-    }
-
-    /** Records the last topology tick at which each int id was seen dirty. */
-    private static final ConcurrentHashMap<Integer, Long> lastMutationTick = new ConcurrentHashMap<>();
-
-    /**
-     * Current topology tick from the underlying {@link PersistentIslandTracker}.
-     * Advances once per {@link #advanceTopology(long)} call. Downstream
-     * systems use this as the universal clock for "has anything
-     * changed since I last ran" queries, replacing the ad-hoc
-     * ALWAYS_DIRTY / {@code lastModifiedEpoch} Long.MAX_VALUE sentinel
-     * which never reflected the actual topology clock.
-     */
-    public static long getTopologyTick() {
-        return topology.getTracker().currentTick();
-    }
-
-    /**
-     * True when the island's voxel set has not mutated since
-     * {@code sinceTick}. Callers that already processed this island on
-     * or after {@code sinceTick} can use this as an early-skip — the
-     * component is topologically clean, no GPU re-solve is required
-     * for shape-change reasons (force / material changes still need
-     * to be handled by their own paths).
-     */
-    public static boolean topologicallyClean(int islandId, long sinceTick) {
-        Long t = lastMutationTick.get(islandId);
-        return t == null || t <= sinceTick;
-    }
-
-    /**
-     * 將於 split 結束時傳送給 {@link #orphanListener} 的事件。
-     * {@code level} 為觸發本次 split 的 ServerLevel（若呼叫者有提供，
-     * 例如 {@link #unregisterBlock}）；{@code flushDestructions} 無此資訊
-     * 時為 {@code null}，由 listener 自行 fallback 查詢。
-     */
-    public record OrphanIslandEvent(int islandId,
-                                    Set<BlockPos> members,
-                                    long epoch,
-                                    @Nullable ServerLevel level) {}
-
-    /** 安裝 orphan listener（無則以 null 解除）。 */
-    public static void setOrphanListener(@Nullable Consumer<OrphanIslandEvent> listener) {
-        orphanListener = listener;
-    }
-
     /** 將 {@code pos} 標記為錨點（若此前未登錄）。執行緒安全；可重複呼叫。 */
     public static void registerAnchor(BlockPos pos) {
-        BlockPos p = pos.immutable();
-        anchorBlocks.add(p);
-        // Mirror to topology so the new-system orphan classifier sees
-        // the same anchor set as the legacy isBlockAnchored() check.
-        topology.setVoxel(p.getX(), p.getY(), p.getZ(), TopologicalSVDAG.TYPE_ANCHOR);
+        anchorBlocks.add(pos.immutable());
     }
 
     /** Returns whether {@code pos} is currently registered as an anchor voxel. */
@@ -229,27 +78,14 @@ public class StructureIslandRegistry {
     /** 取消錨點登錄。若此前未登錄則為 no-op。 */
     public static void unregisterAnchor(BlockPos pos) {
         anchorBlocks.remove(pos);
-        // Demote back to a plain solid voxel if the block itself is
-        // still registered; otherwise reflect as air. The caller is
-        // expected to follow up with unregisterBlock if the block has
-        // actually been broken.
-        byte t = blockToIsland.containsKey(pos)
-                ? TopologicalSVDAG.TYPE_SOLID
-                : TopologicalSVDAG.TYPE_AIR;
-        topology.setVoxel(pos.getX(), pos.getY(), pos.getZ(), t);
     }
 
-    /** 僅供測試：清除全部狀態（含錨點與 listener）以確保測試獨立性。 */
+    /** 僅供測試：清除全部狀態（含錨點）以確保測試獨立性。 */
     public static void resetForTesting() {
         blockToIsland.clear();
         islands.clear();
         anchorBlocks.clear();
-        orphanListener = null;
         nextIslandId.set(1);
-        topology.reset();
-        fingerprintToIntId.clear();
-        intIdToFingerprint.clear();
-        lastMutationTick.clear();
         com.blockreality.api.physics.pnsm.PNSMShadow.reset();
     }
 
@@ -398,15 +234,6 @@ public class StructureIslandRegistry {
      * @return 此方塊所屬的 island ID
      */
     public static int registerBlock(BlockPos pos, long epoch) {
-        // Mirror into topology as a solid voxel before the int-id BFS
-        // runs; the orchestrator's own tick consumes this on the next
-        // advanceTopology() invocation.
-        {
-            byte t = anchorBlocks.contains(pos)
-                    ? TopologicalSVDAG.TYPE_ANCHOR
-                    : TopologicalSVDAG.TYPE_SOLID;
-            topology.setVoxel(pos.getX(), pos.getY(), pos.getZ(), t);
-        }
         // Mirror into the PNSM shadow (Phase 1 of the RFC at
         // docs/design/pfsf-native-structural-memory.md). No-op when
         // the flag is off; idempotent when it is on, so re-registering
@@ -502,10 +329,6 @@ public class StructureIslandRegistry {
      * @return 操作後仍存在的所有 island ID（原 island + 分裂出的新 island）；若 island 消失則空列表
      */
     public static List<Integer> unregisterBlock(ServerLevel level, BlockPos pos, long epoch) {
-        // Mirror into topology first; the orchestrator treats AIR as
-        // "not part of any component" and will drop the voxel from the
-        // next tick's BFS.
-        topology.setVoxel(pos.getX(), pos.getY(), pos.getZ(), TopologicalSVDAG.TYPE_AIR);
         // PNSM shadow mirror — runs unconditionally so a remove of a
         // pos that was never inserted still leaves both sides in sync
         // (the shadow's compute() drops empty leaves cleanly).
@@ -528,13 +351,11 @@ public class StructureIslandRegistry {
 
         // Whether or not the removal looks like it could fragment the
         // island, delegate to the LabelPropagation-backed split path,
-        // which (a) finds all connected components in one pass,
-        // (b) classifies each as anchored / orphan using the registry's
-        // anchor set, (c) notifies the orphan listener for any orphan
-        // fragment in the same tick as the fracture. This is the
-        // correctness fix for the "floating blocks persist for several
-        // ticks" symptom reported by the user.
-        return checkAndSplitIsland(island, removedIslandId, epoch, level, true);
+        // which finds all connected components in one pass and emits the
+        // resulting island IDs (one per fragment). Orphan classification
+        // is no longer surfaced here — the PFSF GPU's failure_scan
+        // φ_orphan threshold is the single authoritative collapse trigger.
+        return checkAndSplitIsland(island, removedIslandId, epoch, level);
     }
 
     /**
@@ -548,7 +369,7 @@ public class StructureIslandRegistry {
             return Collections.emptyList();
         }
         markDirty(islandId);
-        return checkAndSplitIsland(island, islandId, epoch, level, true);
+        return checkAndSplitIsland(island, islandId, epoch, level);
     }
 
     // ═══════════════════════════════════════════════════════
@@ -625,12 +446,6 @@ public class StructureIslandRegistry {
         StructureIsland island = islands.get(islandId);
         if (island != null) {
             island.touch(ALWAYS_DIRTY); // Long.MAX_VALUE sentinel — 永遠比任何 counter epoch 大
-            // Stamp the topology-clock mutation tick too so consumers
-            // using topologicallyClean(id, sinceTick) see the change.
-            // We read currentTick without waiting for the next
-            // advanceTopology call because voxel mutation happens
-            // before tick() runs and should be observable immediately.
-            lastMutationTick.put(islandId, topology.getTracker().currentTick());
         }
     }
 
@@ -667,75 +482,8 @@ public class StructureIslandRegistry {
         blockToIsland.clear();
         islands.clear();
         pendingDestructions.clear(); // P2-C: 清除批次緩衝，避免跨世界殘留
-        topology.reset();
-        fingerprintToIntId.clear();
-        intIdToFingerprint.clear();
-        lastMutationTick.clear();
         com.blockreality.api.physics.pnsm.PNSMShadow.reset();
         LOGGER.info("[IslandRegistry] Cleared all islands");
-    }
-
-    /**
-     * Advance the topology v2 pipeline by one tick.
-     *
-     * <p>Called once per server tick by {@code ServerTickHandler} right
-     * after {@link #flushDestructions()} has applied all block changes
-     * for this tick. The orchestrator runs its BFS partition + Elder
-     * Rule update and fires {@link OrphanIslandEvent}s through the
-     * existing {@link #orphanListener} for any component that lost
-     * anchor connectivity this tick.
-     *
-     * <p>Safe to call on worlds without any registered anchors: the
-     * orchestrator simply reports every component as orphan, but the
-     * installed {@link com.blockreality.api.physics.topology.ThreeTierOrchestrator.OrphanSink}
-     * gates on {@link #anchorBlocks} non-emptiness the same way the
-     * legacy classifier did — so we never flood the collapse manager
-     * before anchor registration is wired from chunk-load.
-     */
-    public static void advanceTopology(long epoch) {
-        if (anchorBlocks.isEmpty()) {
-            // Without anchors every component looks orphan; honour the
-            // legacy safety-valve behaviour instead of spamming the
-            // collapse queue. Still drain the dirty set so the tracker
-            // stays in sync for the moment anchors do come online.
-            topology.getSvdag().drainDirtyRegions();
-            return;
-        }
-        topology.tick();
-        reconcileFingerprintMap();
-    }
-
-    /**
-     * Walk the orchestrator's last-tick component bindings and refresh
-     * the fingerprint↔int maps so every int island observed by this
-     * registry has an Elder-Rule fingerprint attached. Any fingerprint
-     * whose component has dissolved this tick drops out; any int id
-     * whose underlying voxels all vanished likewise drops from the
-     * reverse map. Runs on the server tick thread only; the maps
-     * themselves are ConcurrentHashMap so readers on other threads see
-     * a consistent snapshot per entry.
-     */
-    private static void reconcileFingerprintMap() {
-        // Build the new forward mapping from this tick's bindings.
-        java.util.Map<Long, Integer> freshForward = new HashMap<>();
-        for (ThreeTierOrchestrator.ComponentBinding b : topology.getLastComponentBindings()) {
-            long fp = b.identity().fingerprint();
-            int islandId = -1;
-            for (BlockPos p : b.voxels()) {
-                Integer id = blockToIsland.get(p);
-                if (id != null) { islandId = id; break; }
-            }
-            if (islandId >= 0) {
-                freshForward.put(fp, islandId);
-            }
-        }
-        // Replace both maps atomically-per-entry: drop stale, refresh live.
-        fingerprintToIntId.keySet().retainAll(freshForward.keySet());
-        fingerprintToIntId.putAll(freshForward);
-        intIdToFingerprint.clear();
-        for (var e : freshForward.entrySet()) {
-            intIdToFingerprint.put(e.getValue(), e.getKey());
-        }
     }
 
     // ═══════════════════════════════════════════════════════
@@ -772,13 +520,6 @@ public class StructureIslandRegistry {
         // 快照 + 清空緩衝（允許本 tick 繼續排入下一個緩衝週期）
         Map<BlockPos, Long> snapshot = new HashMap<>(pendingDestructions);
         pendingDestructions.clear();
-
-        // Mirror the full batch into topology up front so a single
-        // advanceTopology() call at the end of the tick sees every
-        // removal at once rather than piecewise.
-        for (BlockPos p : snapshot.keySet()) {
-            topology.setVoxel(p.getX(), p.getY(), p.getZ(), TopologicalSVDAG.TYPE_AIR);
-        }
 
         // 按 island 分組
         Map<Integer, List<BlockPos>> byIsland = new HashMap<>();
@@ -835,18 +576,14 @@ public class StructureIslandRegistry {
      */
     /**
      * Recompute the island's connectivity using {@link LabelPropagation}
-     * and, if the set has fragmented, create new islands for each
-     * disconnected component.
+     * and, if the set has fragmented, create a new island for each
+     * disconnected component while preserving Elder-Rule identity (the
+     * fragment containing the original birth voxel keeps the int id).
      *
-     * <p>The critical correctness improvement over the prior single-seed
-     * BFS: each resulting component is independently classified as
-     * anchored or orphan by consulting {@link #anchorBlocks}. Any
-     * orphan component is reported to {@link #orphanListener}
-     * <b>in the same tick as the fracture</b>, so CollapseManager can
-     * collapse the fragment immediately instead of waiting for the
-     * PFSF potential field to diverge past {@code PHI_ORPHAN_THRESHOLD}
-     * over the next several ticks — that delay is the "floating-block
-     * ghost" documented in the GPU audit.
+     * <p>Orphan-vs-anchored classification is computed but not surfaced
+     * here: collapse triggering is owned by the PFSF GPU failure_scan
+     * (φ_orphan threshold). This routine only updates int-id ↔ voxel
+     * bookkeeping so the GPU has a coherent island partition next tick.
      */
     private static List<Integer> checkAndSplitIsland(StructureIsland island, int islandId, long epoch) {
         return checkAndSplitIsland(island, islandId, epoch, null);
@@ -856,44 +593,28 @@ public class StructureIslandRegistry {
                                                      int islandId,
                                                      long epoch,
                                                      @Nullable ServerLevel level) {
-        return checkAndSplitIsland(island, islandId, epoch, level, false);
-    }
-
-    private static List<Integer> checkAndSplitIsland(StructureIsland island,
-                                                     int islandId,
-                                                     long epoch,
-                                                     @Nullable ServerLevel level,
-                                                     boolean allowAnchorlessClassification) {
         if (island.getBlockCount() == 0) {
             islands.remove(islandId);
             return Collections.emptyList();
         }
         if (island.getBlockCount() == 1) {
             island.recalculateBounds();
-            BlockPos only = island.members.iterator().next();
-            boolean anchored = isBlockAnchored(only);
-            if (!anchored && orphanClassificationEnabled(allowAnchorlessClassification)) {
-                notifyOrphan(islandId, Set.of(only), epoch, level);
-            }
             return Collections.singletonList(islandId);
         }
 
         // Authoritative partition: SV-equivalent BFS over the island's
         // current member set with anchor-adjacency check folded in.
+        // Orphan classification is no longer surfaced here — PFSF GPU's
+        // failure_scan φ_orphan threshold is the single authoritative
+        // source for triggering collapse.
         LabelPropagation.PartitionResult partition = LabelPropagation.bfsComponents(
                 new HashSet<>(island.members),
                 anchorBlocks,
                 LabelPropagation.NeighborPolicy.FACE_6);
 
         if (partition.components().size() == 1) {
-            // Still a single connected component. Update AABB; if the
-            // whole component is now orphan (e.g. its only anchor was
-            // just removed), surface it to the orphan listener.
+            // Still a single connected component. Update AABB.
             island.recalculateBounds();
-            LabelPropagation.Component sole = partition.components().get(0);
-            if (!sole.anchored() && orphanClassificationEnabled(allowAnchorlessClassification)) {
-                notifyOrphan(islandId, sole.members(), epoch, level);
-            }
             return Collections.singletonList(islandId);
         }
 
@@ -939,10 +660,6 @@ public class StructureIslandRegistry {
 
         List<Integer> resultIds = new java.util.ArrayList<>();
         resultIds.add(islandId);
-        if (!keep.anchored() && orphanClassificationEnabled(allowAnchorlessClassification)) {
-            // Even the "kept" component is orphan — tell CollapseManager.
-            notifyOrphan(islandId, keep.members(), epoch, level);
-        }
 
         for (int i = 0; i < partition.components().size(); i++) {
             if (i == keepIdx) continue;
@@ -959,73 +676,8 @@ public class StructureIslandRegistry {
             resultIds.add(newId);
             LOGGER.info("[IslandRegistry] Split: new island {} with {} blocks from island {} (anchored={})",
                     newId, c.members().size(), islandId, c.anchored());
-            if (!c.anchored() && orphanClassificationEnabled(allowAnchorlessClassification)) {
-                notifyOrphan(newId, c.members(), epoch, level);
-            }
         }
         return resultIds;
-    }
-
-    /**
-     * True iff {@code pos} itself is a registered anchor, or a face-
-     * neighbour is. Matches the semantics of
-     * {@link LabelPropagation#bfsComponents} with
-     * {@link LabelPropagation.NeighborPolicy#FACE_6}.
-     */
-    /**
-     * Gate that surrounds every {@code notifyOrphan} call in
-     * {@link #checkAndSplitIsland}. When {@link #anchorBlocks} is
-     * empty — the current production state — every component appears
-     * orphan to the classifier and CollapseManager gets flooded with
-     * spurious entries on every block break. Returning false here
-     * silences orphan notification until anchor registration is wired.
-     * Logs the first trigger per JVM so operators can tell the valve
-     * is in effect.
-     */
-    private static boolean orphanClassificationEnabled(boolean allowAnchorlessClassification) {
-        if (allowAnchorlessClassification) return true;
-        if (!anchorBlocks.isEmpty()) return true;
-        if (SAFETY_VALVE_LOGGED.compareAndSet(false, true)) {
-            LOGGER.warn(
-                "[IslandRegistry] Safety valve active: anchorBlocks is empty; "
-                + "neither the legacy BFS classifier nor the topology v2 "
-                + "orchestrator (now wired in advanceTopology) will fire "
-                + "OrphanIslandEvent until at least one anchor is registered "
-                + "via registerAnchor(...). Chunk-load natural-anchor "
-                + "registration is the outstanding wiring task."
-            );
-        }
-        return false;
-    }
-
-    private static boolean isBlockAnchored(BlockPos pos) {
-        if (anchorBlocks.contains(pos)) return true;
-        for (Direction d : Direction.values()) {
-            if (anchorBlocks.contains(pos.relative(d))) return true;
-        }
-        return false;
-    }
-
-    private static void notifyOrphan(int islandId,
-                                     Set<BlockPos> members,
-                                     long epoch,
-                                     @Nullable ServerLevel level) {
-        Consumer<OrphanIslandEvent> listener = orphanListener;
-        if (listener == null) {
-            // No-fallback contract: production has no orphan listener. Topology
-            // BFS still runs (its dirty-region tracking serves other purposes)
-            // but the result is dropped — orphan detection now happens on the
-            // GPU via failure_scan's φ_orphan threshold. Logged at debug only;
-            // in production every fracture would otherwise spam this line.
-            LOGGER.debug("[IslandRegistry] Orphan island {} ({} blocks) detected; PFSF will collapse via φ divergence",
-                    islandId, members.size());
-            return;
-        }
-        try {
-            listener.accept(new OrphanIslandEvent(islandId, Set.copyOf(members), epoch, level));
-        } catch (Throwable t) {
-            LOGGER.error("[IslandRegistry] Orphan listener threw for island " + islandId, t);
-        }
     }
 
     /** 診斷用統計資訊 */
