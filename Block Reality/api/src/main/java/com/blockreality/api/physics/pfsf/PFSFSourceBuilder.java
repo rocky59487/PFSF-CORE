@@ -31,43 +31,61 @@ public final class PFSFSourceBuilder {
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * 多源 BFS 計算每個體素到最近錨點的水平 Manhattan 距離。
-     * 僅計算 X + Z 方向（忽略 Y），用於力矩修正。
+     * 多源 0-1 BFS 計算每個體素到最近錨點的水平 Manhattan 距離（力臂）。
+     *
+     * <p>力臂的物理意義是「彎矩臂」：垂直移動（沿重力方向，純柱壓縮/拉力）
+     * 不貢獻彎矩，水平移動才會放大彎矩。所以走訪鄰居時：</p>
+     * <ul>
+     *   <li>UP/DOWN 鄰居：cost = 0（力臂不變）— 走柱子向上不會把柱頂變懸臂</li>
+     *   <li>±X / ±Z 鄰居：cost = 1（力臂 +1）</li>
+     * </ul>
+     *
+     * <p>用 ArrayDeque 實作 0-1 BFS：cost-0 邊 addFirst，cost-1 邊 addLast，
+     * 確保第一次到達節點時是最短水平路徑。允許 lazy relaxation 處理多源重疊。</p>
+     *
+     * <p>修正前的舊版只走 HORIZONTAL_DIRS — 一根牆站在地基上、頂端水平延伸出
+     * 懸臂的情境裡，BFS 從牆底錨點出發無法爬上牆頂，整段懸臂的 arm 默認為 0，
+     * 導致 {@code computeMaxPhiTimoshenko(arm=0)} 短路返回 1.0×（無放大），
+     * maxPhi 拿到滿值，failure_scan 永不觸發 CANTILEVER_BREAK。</p>
      *
      * @param islandMembers island 中所有方塊位置
      * @param anchors       錨點位置集合
-     * @return 每個體素的水平力臂（arm），錨點 = 0，無水平路徑者 = 0
+     * @return 每個體素的水平力臂；錨點 = 0；純垂直懸掛體素 = 0（沿錨點正上/正下，無水平偏移）；
+     *         不在 island 中的方塊不在 map 內
      */
     public static Map<BlockPos, Integer> computeHorizontalArmMap(
             Set<BlockPos> islandMembers, Set<BlockPos> anchors) {
 
         Map<BlockPos, Integer> armMap = new HashMap<>();
-        Deque<BlockPos> queue = new ArrayDeque<>();
+        Deque<BlockPos> deque = new ArrayDeque<>();
 
-        // 錨點作為 BFS 源，arm = 0
         for (BlockPos anchor : anchors) {
             if (islandMembers.contains(anchor)) {
                 armMap.put(anchor, 0);
-                queue.add(anchor);
+                deque.addLast(anchor);
             }
         }
 
-        // BFS：僅沿水平方向擴展
-        while (!queue.isEmpty()) {
-            BlockPos cur = queue.poll();
+        while (!deque.isEmpty()) {
+            BlockPos cur = deque.pollFirst();
             int curArm = armMap.get(cur);
 
-            for (Direction dir : HORIZONTAL_DIRS) {
+            for (Direction dir : Direction.values()) {
                 BlockPos nb = cur.relative(dir);
-                if (islandMembers.contains(nb) && !armMap.containsKey(nb)) {
-                    armMap.put(nb, curArm + 1);
-                    queue.add(nb);
-                }
+                if (!islandMembers.contains(nb)) continue;
+
+                boolean vertical = (dir == Direction.UP || dir == Direction.DOWN);
+                int candidate = vertical ? curArm : curArm + 1;
+
+                Integer existing = armMap.get(nb);
+                if (existing != null && existing <= candidate) continue;
+
+                armMap.put(nb, candidate);
+                if (vertical) deque.addFirst(nb);
+                else          deque.addLast(nb);
             }
         }
 
-        // 無水平路徑到錨點的方塊（純垂直懸掛）：arm = 0
-        // 由垂直 BFS 或預設處理
         return armMap;
     }
 
