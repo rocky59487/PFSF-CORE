@@ -10,9 +10,12 @@ import com.blockreality.api.physics.ConnectivityCache;
 import com.blockreality.api.physics.RCFusionDetector;
 import com.blockreality.api.physics.StructureIslandRegistry;
 import com.blockreality.api.physics.pfsf.PFSFEngine;
+import com.blockreality.api.physics.pfsf.PFSFLockdown;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraftforge.common.MinecraftForge;
@@ -30,12 +33,29 @@ public final class BlockPhysicsEventHandler {
 
     private BlockPhysicsEventHandler() {}
 
-    @SubscribeEvent(priority = EventPriority.NORMAL)
+    @SubscribeEvent(priority = EventPriority.HIGHEST)
     public static void onBlockPlaced(BlockEvent.EntityPlaceEvent event) {
         if (!(event.getLevel() instanceof ServerLevel level)) return;
 
         BlockPos pos = event.getPos().immutable();
-        if (!(event.getPlacedBlock().getBlock() instanceof RBlock)) {
+        boolean isRBlock = event.getPlacedBlock().getBlock() instanceof RBlock;
+
+        // No-fallback contract: PFSF is the sole arbiter of RBlock physics. When PFSF is
+        // locked (GPU init failed / numerical divergence), RBlock placement is blocked so
+        // the world cannot accumulate physics-bearing structures the engine cannot solve.
+        if (isRBlock && PFSFLockdown.isLocked()) {
+            event.setCanceled(true);
+            if (event.getEntity() instanceof Player p) {
+                p.displayClientMessage(
+                        Component.literal("§c[Block Reality] §fRBlock placement blocked: PFSF unavailable (")
+                                .append(Component.literal(PFSFLockdown.getReason()))
+                                .append(Component.literal(")")),
+                        true);
+            }
+            return;
+        }
+
+        if (!isRBlock) {
             level.getServer().execute(() -> refreshAdjacentNaturalAnchors(level, pos));
             return;
         }
@@ -89,6 +109,21 @@ public final class BlockPhysicsEventHandler {
         BlockEntity be = level.getBlockEntity(pos);
         if (!(be instanceof RBlockEntity rbe)) {
             level.getServer().execute(() -> refreshAdjacentNaturalAnchors(level, pos));
+            return;
+        }
+
+        // Mirror the place-side guard: while PFSF is locked, RBlock break is also blocked
+        // so the registry's island bookkeeping cannot drift away from a physics state the
+        // engine cannot recompute. Creative-mode players still see the chat warning.
+        if (PFSFLockdown.isLocked()) {
+            event.setCanceled(true);
+            if (event.getPlayer() != null) {
+                event.getPlayer().displayClientMessage(
+                        Component.literal("§c[Block Reality] §fRBlock break blocked: PFSF unavailable (")
+                                .append(Component.literal(PFSFLockdown.getReason()))
+                                .append(Component.literal(")")),
+                        true);
+            }
             return;
         }
 

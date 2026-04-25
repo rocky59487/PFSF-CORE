@@ -70,17 +70,20 @@ public final class NativePFSFBridge {
         } catch (UnsatisfiedLinkError e) {
             // Expected on developer builds without :api:nativeBuild and on
             // platforms the CI matrix hasn't covered (linux-arm64, etc.).
+            // The Java GPU solver path remains authoritative; lockdown is engaged
+            // separately by VulkanComputeContext if Vulkan itself fails.
             LOGGER.info("NativePFSFBridge skipped: {} — Java solver will be used.",
                     e.getMessage());
         } catch (AbiMismatchError e) {
-            // Mismatched .so/.dll/.dylib vs the jar's manifest contract
-            // — refuse to bind. A mismatch here means the native binary
-            // and the java side would interpret structs differently at
-            // runtime. Fall back to the Java solver instead of risking
-            // silent memory corruption.
-            LOGGER.error("NativePFSFBridge disabled: {}", e.getMessage());
+            // Hard-fail: mismatched .so/.dll/.dylib vs the jar's manifest contract
+            // means the native binary and the java side would interpret structs
+            // differently — silent memory corruption risk. Engage lockdown so the
+            // engine refuses to dispatch and the player sees a red HUD warning.
+            LOGGER.error("NativePFSFBridge ABI mismatch: {}", e.getMessage());
+            PFSFLockdown.lock("Native library ABI mismatch — rebuild required");
         } catch (Throwable t) {
-            LOGGER.warn("NativePFSFBridge failed to initialise: {}", t.toString());
+            LOGGER.error("NativePFSFBridge failed to initialise: {}", t.toString(), t);
+            PFSFLockdown.lock("Native PFSF bridge init error: " + t.getClass().getSimpleName());
         }
         LIBRARY_LOADED       = loaded;
         VERSION_STRING       = version;

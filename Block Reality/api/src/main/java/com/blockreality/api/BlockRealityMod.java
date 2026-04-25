@@ -161,6 +161,9 @@ public class BlockRealityMod {
     public void onServerStarting(ServerStartingEvent event) {
 
         // ─── B1-fix: 初始化 PFSF GPU 物理引擎 ───
+        // No-fallback contract: any failure during init engages PFSFLockdown so
+        // RBlock interactions are blocked and players see a red HUD warning.
+        // The mod still loads — the rest of vanilla survives — but physics is off.
         try {
             com.blockreality.api.physics.pfsf.VulkanComputeContext.init();
             PFSFEngine.init();
@@ -188,19 +191,27 @@ public class BlockRealityMod {
                 PFSFEngine.setFillRatioLookup(pos -> 1.0f); // 預設滿填充
                 LOGGER.info("[BlockReality] PFSF GPU 物理引擎已啟動");
             } else {
+                // VulkanComputeContext or PFSFEngineInstance already engaged lockdown
+                // when they failed; assert it here so a missing wiring upstream still
+                // trips the lockdown for the player-visible red HUD path.
+                if (!com.blockreality.api.physics.pfsf.PFSFLockdown.isLocked()) {
+                    com.blockreality.api.physics.pfsf.PFSFLockdown.lock(
+                            "PFSF GPU engine unavailable (Vulkan compute required)");
+                }
                 LOGGER.error("[BlockReality] ════════════════════════════════════════════");
-                LOGGER.error("[BlockReality] PFSF GPU 物理引擎不可用 — 物理計算不會執行");
-                LOGGER.error("[BlockReality] 此模組需要 Vulkan compute；請檢查 driver / GPU 支援");
-                LOGGER.error("[BlockReality] 並檢視 [PFSF-VulkanCtx] 訊息以取得失敗原因");
+                LOGGER.error("[BlockReality] PFSF GPU LOCKDOWN: {}",
+                        com.blockreality.api.physics.pfsf.PFSFLockdown.getReason());
+                LOGGER.error("[BlockReality] RBlock 互動已凍結；玩家上線時會看到紅字警告");
+                LOGGER.error("[BlockReality] 請檢視 [PFSF-VulkanCtx] 訊息以取得失敗原因");
                 LOGGER.error("[BlockReality] ════════════════════════════════════════════");
             }
         } catch (Exception e) {
-            LOGGER.error("[BlockReality] PFSF 初始化拋例外 — 物理計算不會執行 ({}): {}",
-                    e.getClass().getSimpleName(), e.getMessage(), e);
+            String reason = "PFSF init exception: " + e.getClass().getSimpleName()
+                    + (e.getMessage() != null ? " — " + e.getMessage() : "");
+            LOGGER.error("[BlockReality] {}", reason, e);
+            com.blockreality.api.physics.pfsf.PFSFLockdown.lock(reason);
         }
-
-        
-            }
+    }
 
     @SubscribeEvent
     public void onServerStarted(ServerStartedEvent event) {
@@ -212,19 +223,20 @@ public class BlockRealityMod {
         boolean physicsOn = com.blockreality.api.config.BRConfig.isPhysicsEnabled();
         boolean pfsfOn    = com.blockreality.api.config.BRConfig.isPFSFEnabled();
         boolean pfsfAvail = PFSFEngine.isAvailable();
+        boolean locked    = com.blockreality.api.physics.pfsf.PFSFLockdown.isLocked();
         boolean nativeOn  = com.blockreality.api.physics.pfsf.NativePFSFRuntime.isActive();
         int shaders = com.blockreality.api.physics.pfsf.NativePFSFRuntime.getShadersRegistered();
         boolean pnsmShadow = com.blockreality.api.config.BRConfig.isPNSMShadowEnabled();
-        LOGGER.info("[BlockReality] Physics status — physics={} pfsf_cfg={} pfsf_gpu={} native={} shaders={} pnsm_shadow={}",
+        LOGGER.info("[BlockReality] Physics status — physics={} pfsf_cfg={} pfsf_gpu={} locked={} native={} shaders={} pnsm_shadow={}",
                 physicsOn ? "ON" : "OFF",
                 pfsfOn ? "ON" : "OFF",
                 pfsfAvail ? "AVAILABLE" : "UNAVAILABLE",
+                locked ? "YES (" + com.blockreality.api.physics.pfsf.PFSFLockdown.getReason() + ")" : "NO",
                 nativeOn ? "ACTIVE" : "INACTIVE",
                 shaders,
                 pnsmShadow ? "ON" : "OFF");
-        if (physicsOn && pfsfOn && !pfsfAvail) {
-            LOGGER.warn("[BlockReality] PFSF is configured ON but GPU is UNAVAILABLE — physics will be silent. "
-                    + "Run /br vulkan_test or check the VulkanComputeContext init log above for details.");
+        if (locked) {
+            LOGGER.warn("[BlockReality] PFSF LOCKDOWN ACTIVE — RBlock interactions blocked, players will see red HUD banner");
         }
     }
 

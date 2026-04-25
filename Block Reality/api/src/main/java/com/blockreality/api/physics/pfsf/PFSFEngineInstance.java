@@ -56,7 +56,12 @@ public final class PFSFEngineInstance implements IPFSFRuntime {
         if (initialized) return;
         initialized = true;
         if (!VulkanComputeContext.isAvailable()) {
-            LOGGER.warn("[PFSF] VulkanComputeContext not available, engine disabled");
+            // VulkanComputeContext.init() already engaged lockdown if this is a real failure.
+            // Re-assert here so missing init() upstream still trips the lockdown.
+            if (!PFSFLockdown.isLocked()) {
+                PFSFLockdown.lock("VulkanComputeContext not initialized");
+            }
+            LOGGER.error("[PFSF] VulkanComputeContext not available, engine disabled (lockdown engaged)");
             available = false;
             return;
         }
@@ -67,6 +72,7 @@ public final class PFSFEngineInstance implements IPFSFRuntime {
             long pool = VulkanComputeContext.createIsolatedDescriptorPool(4096, 16384, "PFSF");
             if (pool == 0) {
                 LOGGER.error("[PFSF] createIsolatedDescriptorPool returned 0 handle — init aborted");
+                PFSFLockdown.lock("PFSF descriptor pool allocation failed (VRAM exhaustion?)");
                 available = false;
                 return;
             }
@@ -78,7 +84,10 @@ public final class PFSFEngineInstance implements IPFSFRuntime {
             com.blockreality.api.physics.pfsf.augbind.DefaultAugmentationBinders.install();
             LOGGER.info("[PFSF] Engine initialized successfully");
         } catch (Throwable e) {
-            LOGGER.error("[PFSF] Engine init failed", e);
+            String reason = "PFSF engine init failed: " + e.getClass().getSimpleName()
+                    + (e.getMessage() != null ? " — " + e.getMessage() : "");
+            LOGGER.error("[PFSF] {}", reason, e);
+            PFSFLockdown.lock(reason);
             available = false;
         }
     }

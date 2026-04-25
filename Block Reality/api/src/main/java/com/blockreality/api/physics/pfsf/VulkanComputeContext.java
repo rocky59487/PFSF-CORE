@@ -105,6 +105,7 @@ public final class VulkanComputeContext {
                 LOGGER.info("[PFSF] Standalone Vulkan compute device: {}", deviceName);
             } else {
                 LOGGER.error("[PFSF] Vulkan standalone init returned false — 物理引擎將無法運作");
+                PFSFLockdown.lock("Vulkan device init failed (driver/GPU does not support compute)");
                 return;
             }
 
@@ -129,10 +130,17 @@ public final class VulkanComputeContext {
                     vramBudgetMgr.getTotalBudget() / (1024 * 1024));
 
         } catch (Throwable e) {
-            LOGGER.error("[PFSF] Vulkan Compute init failed: {} ({})", e.getMessage(), e.getClass().getSimpleName());
+            // No-fallback contract: GPU init failure must surface to the player as a
+            // hard lockdown, not silently leave computeSupported=false. Set the lockdown
+            // reason and let the caller propagate; PFSFEngineInstance.init() / BlockRealityMod
+            // both check PFSFLockdown.isLocked() to enter physics-frozen mode.
+            String reason = "Vulkan Compute init failed: " + e.getClass().getSimpleName()
+                    + (e.getMessage() != null ? " — " + e.getMessage() : "");
+            LOGGER.error("[PFSF] {}", reason);
             if (e instanceof UnsatisfiedLinkError) {
                 LOGGER.error("[PFSF]   → Native library load failure — 可能是 VMA 或 Shaderc native jar 未在 classpath");
             }
+            PFSFLockdown.lock(reason);
             computeSupported = false;
         }
     }

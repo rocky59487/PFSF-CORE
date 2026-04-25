@@ -164,5 +164,14 @@ public class BRNetwork {
             FluidSyncPacket::decode,
             FluidSyncPacket::handle
         );
+
+        // PFSF 鎖定狀態同步 (S→C)：GPU 失敗時通知客戶端顯示紅字 HUD
+        CHANNEL.registerMessage(
+            packetId.getAndIncrement(),
+            PFSFLockdownPacket.class,
+            PFSFLockdownPacket::encode,
+            PFSFLockdownPacket::decode,
+            PFSFLockdownPacket::handle
+        );
     }
 }

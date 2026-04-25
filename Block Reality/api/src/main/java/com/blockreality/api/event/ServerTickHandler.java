@@ -165,6 +165,26 @@ public class ServerTickHandler {
     }
 
     /**
+     * 玩家上線時若 PFSF 處於鎖定狀態，立即送出鎖定封包 + 聊天紅字警告，
+     * 確保新加入的玩家也能看到 HUD 橫幅而非以為一切正常。
+     */
+    @SubscribeEvent
+    public static void onPlayerLoggedIn(PlayerEvent.PlayerLoggedInEvent event) {
+        if (!(event.getEntity() instanceof net.minecraft.server.level.ServerPlayer sp)) return;
+        if (!com.blockreality.api.physics.pfsf.PFSFLockdown.isLocked()) return;
+
+        String reason = com.blockreality.api.physics.pfsf.PFSFLockdown.getReason();
+        BRNetwork.CHANNEL.send(
+                net.minecraftforge.network.PacketDistributor.PLAYER.with(() -> sp),
+                new com.blockreality.api.network.PFSFLockdownPacket(true, reason));
+
+        sp.sendSystemMessage(net.minecraft.network.chat.Component.literal(
+                "§c§l[Block Reality] §c⚠ PFSF physics engine is locked: §f" + reason));
+        sp.sendSystemMessage(net.minecraft.network.chat.Component.literal(
+                "§c[Block Reality] §fRBlock placement and breaking are disabled until the server restarts with a working GPU."));
+    }
+
+    /**
      * 世界卸載時清空坍方佇列。
      */
     @SubscribeEvent
