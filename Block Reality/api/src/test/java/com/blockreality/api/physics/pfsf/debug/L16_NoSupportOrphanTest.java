@@ -12,17 +12,21 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /**
  * L16: NO_SUPPORT (type=3) orphan voxel trigger.
  *
- * <p>The RBGS solver B4-fix (rbgs_smooth.comp.glsl line ~180):
- * when {@code sumSigma == 0} (all neighbor conductivities are zero), the shader
- * sets {@code phi_gs = 1e7}. Since {@code phi_orphan = 1e6} (from
- * {@code constants.h:PHI_ORPHAN_THRESHOLD}), the failure_scan shader fires
- * {@code fail_flags[i] = 3} (NO_SUPPORT) for any isolated solid voxel.</p>
+ * <p>{@code rbgs_smooth.comp.glsl} writes {@code phi_gs = 0.0} for a
+ * voxel with {@code sumSigma == 0} (the "energy explosion fix" — see
+ * the comment block at line ~170 of rbgs_smooth). Because the orphan
+ * φ never reaches the legacy {@code phi_orphan = 1e6} threshold,
+ * failure_scan's NO_SUPPORT detection now uses a topological test
+ * (six face σ all zero) in addition to the legacy φ-divergence path —
+ * the two paths together cover both single-voxel isolation and
+ * whole-component orphans.</p>
  *
  * <p>This test creates a 3×3×3 island with one fully isolated center voxel
- * (zero conductivity to all 26 neighbors) and verifies that after one tick
- * the readback phi exceeds 1e6 and at least one NO_SUPPORT event is reported.</p>
+ * (zero conductivity to all 6 face neighbours) and verifies that the
+ * topological branch produces a NO_SUPPORT event. The voxel's φ stays at 0
+ * by design and is not asserted upon.</p>
  */
-@DisplayName("L16: NO_SUPPORT(type=3) — Orphan Voxel phi=1e7 > phi_orphan=1e6")
+@DisplayName("L16: NO_SUPPORT(type=3) — Topologically Isolated Voxel")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class L16_NoSupportOrphanTest {
 
@@ -35,6 +39,14 @@ class L16_NoSupportOrphanTest {
     long handle = 0L;
     ByteBuffer phi, source, cond, type, rcomp, rtens, maxPhi;
     ByteBuffer matId, anchor, fluid, curing;
+    /**
+     * Failure-buffer captured during {@link #setup()} after the first tick.
+     * Re-running {@code nativeTickDbb} in a later @Test would early-return
+     * (the engine marks the island clean after dispatch and skips clean
+     * islands), so we keep the readback from the only tick the engine
+     * actually runs on this fixture and assert against it across tests.
+     */
+    ByteBuffer setupFailBuf;
 
     @BeforeAll
     void setup() {
@@ -87,9 +99,9 @@ class L16_NoSupportOrphanTest {
         NativePFSFBridge.nativeRegisterIslandLookups(handle, ISLAND_ID, matId, anchor, fluid, curing);
         NativePFSFBridge.nativeRegisterStressReadback(handle, ISLAND_ID, phi);
 
-        ByteBuffer fb = ByteBuffer.allocateDirect(4 + 1024 * 16).order(ByteOrder.LITTLE_ENDIAN);
-        fb.putInt(0, 0);
-        int rc = NativePFSFBridge.nativeTickDbb(handle, new int[]{ISLAND_ID}, 1L, fb);
+        setupFailBuf = ByteBuffer.allocateDirect(4 + 1024 * 16).order(ByteOrder.LITTLE_ENDIAN);
+        setupFailBuf.putInt(0, 0);
+        int rc = NativePFSFBridge.nativeTickDbb(handle, new int[]{ISLAND_ID}, 1L, setupFailBuf);
         assumeTrue(rc == NativePFSFBridge.PFSFResult.OK, "tick failed rc=" + rc);
     }
 
@@ -110,8 +122,13 @@ class L16_NoSupportOrphanTest {
     }
 
     @Test @Order(1)
-    @DisplayName("L16-01: 孤立體素 phi > phi_orphan (1e6) — RBGS B4-fix 正確寫入")
-    void orphanVoxelExceedsPhiOrphanThreshold() {
+    @DisplayName("L16-01: 孤立體素 phi 維持 0（rbgs energy-explosion fix 合約）")
+    void orphanVoxelPhiStaysZero() {
+        // After rbgs_smooth's energy-explosion fix, an isolated voxel's φ
+        // is held at 0 instead of being driven to 1e7 — the previous 1e7
+        // overshoot leaked through the energy field hField and corrupted
+        // its neighbours. Failure detection migrated to a topological
+        // test (σ-based) in failure_scan; see L16-02.
         phi.rewind();
         float orphanPhi = 0f;
         for (int i = 0; i < NS; i++) {
@@ -119,28 +136,29 @@ class L16_NoSupportOrphanTest {
             if (i == ORPHAN_IDX) orphanPhi = v;
         }
         System.out.printf("[L16] orphan voxel phi=%.4e%n", orphanPhi);
-        assertTrue(orphanPhi > PHI_ORPHAN,
-                "Orphan phi=" + orphanPhi + " should be > phi_orphan=" + PHI_ORPHAN +
-                "\n  Check RBGS B4-fix: 'else { phi_gs = 1e7; }' in rbgs_smooth.comp.glsl");
+        assertEquals(0.0f, orphanPhi, 1e-3f,
+                "Orphan voxel φ must stay at 0 per rbgs_smooth.comp.glsl L173 contract; got " + orphanPhi);
     }
 
     @Test @Order(2)
-    @DisplayName("L16-02: failure type=3 (NO_SUPPORT) 事件存在")
+    @DisplayName("L16-02: failure type=3 (NO_SUPPORT) 由拓撲分支觸發")
     void noSupportFailureEventFired() {
-        // Re-tick to get fresh failure events
-        ByteBuffer fb = ByteBuffer.allocateDirect(4 + 1024 * 16).order(ByteOrder.LITTLE_ENDIAN);
-        fb.putInt(0, 0);
-        NativePFSFBridge.nativeTickDbb(handle, new int[]{ISLAND_ID}, 2L, fb);
-
-        int count = fb.getInt(0);
-        assertTrue(count >= 1, "No failure events — expected at least 1 NO_SUPPORT event");
+        // Asserts against the failure buffer the engine produced during the
+        // single tick that ran in @BeforeAll. The engine marks the island
+        // clean after dispatch and skips it on subsequent ticks, so any
+        // re-tick here would not re-run failure_scan.
+        int count = setupFailBuf.getInt(0);
+        assertTrue(count >= 1,
+                "No failure events — expected at least 1 NO_SUPPORT event from the "
+                        + "topologically-isolated centre voxel");
 
         boolean foundNoSupport = false;
         for (int i = 0; i < Math.min(count, 1024); i++) {
-            if (fb.getInt(16 + i * 16) == 3) { foundNoSupport = true; break; }
+            // event tuple layout: int x, y, z, type at offsets 4+i*16..16+i*16
+            if (setupFailBuf.getInt(16 + i * 16) == 3) { foundNoSupport = true; break; }
         }
         assertTrue(foundNoSupport,
-                "failure type=3 (NO_SUPPORT) not found in " + count + " events. " +
-                "Check failure_scan.comp.glsl: 'fail_flags[i] = (p > phi_orphan) ? 3u : 1u'");
+                "failure type=3 (NO_SUPPORT) not found in " + count + " events. "
+                        + "Check failure_scan.comp.glsl topological orphan branch (sumSigma6==0)");
     }
 }

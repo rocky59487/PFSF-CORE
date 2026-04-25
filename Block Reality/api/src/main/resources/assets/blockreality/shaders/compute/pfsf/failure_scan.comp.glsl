@@ -44,14 +44,27 @@ void main() {
 
     float p = phi[i];
 
-    // ─── Orphan: φ blows up when no anchor path can drain the source. ───
-    // The previous "cantilever" branch (`p > maxPhi[i]`) was a Timoshenko
-    // moment heuristic computed on a horizontal-arm BFS — a guess made to
-    // pre-empt the iterative solver. It conflicted with pure stress
-    // detection (every block an arm-BFS could not reach was promoted to
-    // its own anchor and then trivially "passed" the maxPhi check).
-    // Removed; the crush / tension checks below are the actual physics.
-    if (p > pc.phi_orphan) {
+    // ─── NO_SUPPORT (orphan) detection — two complementary paths ───
+    //
+    // (a) Topological isolation: a single voxel whose six face-conductivities
+    //     are all zero has no live edges to any neighbour. Since
+    //     rbgs_smooth.comp.glsl L173 writes phi_gs = 0.0 in this case
+    //     (the "energy explosion fix" — see commit comment there), φ never
+    //     blows up for an isolated voxel and the (b) check below cannot
+    //     surface it. Detect it directly from the σ topology — this is
+    //     the half-promise rbgs left for failure_scan to fulfil.
+    //
+    // (b) φ divergence: a multi-voxel component that has lost its anchor
+    //     path stays internally connected (σ > 0 between members), so the
+    //     PCG iterates on it and φ blows up across the component because
+    //     no Dirichlet drain exists. The phi_orphan threshold catches this
+    //     case unchanged from the legacy contract.
+    //
+    // Both fall back to the same failure code (FAIL_NO_SUPPORT = 3).
+    float sumSigma6 = sigma[0u * N + i] + sigma[1u * N + i]
+                    + sigma[2u * N + i] + sigma[3u * N + i]
+                    + sigma[4u * N + i] + sigma[5u * N + i];
+    if (sumSigma6 == 0.0 || p > pc.phi_orphan) {
         fail_flags[i] = 3u;  // FAIL_NO_SUPPORT
         return;
     }
