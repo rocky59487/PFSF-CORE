@@ -243,9 +243,6 @@ public class CollapseManager {
         BlockState state = level.getBlockState(pos);
         if (state.isAir()) return;
 
-        BlockEntity be = level.getBlockEntity(pos);
-        if (!(be instanceof RBlockEntity)) return;
-
         // ─── 記錄到崩塌日誌（undo 回滾用）───
         // chainId uses server tick so collapses in the same tick form one undo-able chain,
         // rather than all PFSF collapses ever sharing chainId=-1.

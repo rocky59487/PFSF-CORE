@@ -242,8 +242,8 @@ public final class NativePFSFRuntime {
         // Entry present → island keeps being ticked; decremented each tick; removed at 0.
         // Budget scales with island volume: n/64 ticks, clamped to [4, 20].
         // 4×4×4 (64 vox) → 4 ticks; 8×8×8 (512 vox) → 8 ticks; 16×16×16+ → 20 ticks.
-        private static final int MAX_SOLVE_TICKS = 20;
-        private static final int MIN_SOLVE_TICKS = 4;
+        private static final int MIN_SOLVE_TICKS = 2;
+        private static final int MAX_SOLVE_TICKS = 200; // Increased from 20 to allow full GPU solver convergence and realistic fracture mechanics.
         final java.util.Map<Integer, Integer> solveTicksLeft = new java.util.HashMap<>();
 
         // Pre-allocated failure readback buffer — capacity for 1024 events.

@@ -660,7 +660,21 @@ public final class VulkanComputeContext {
         try (InputStream is = VulkanComputeContext.class.getClassLoader()
                 .getResourceAsStream(resourcePath)) {
             if (is == null) throw new IOException("Shader not found: " + resourcePath);
-            return new String(is.readAllBytes(), StandardCharsets.UTF_8);
+            String src = new String(is.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            if (src.contains("#include \"stencil_constants.glsl\"")) {
+                String parentPath = resourcePath.substring(0, resourcePath.lastIndexOf('/') + 1);
+                String includePath = parentPath + "stencil_constants.glsl";
+                try (InputStream isInc = VulkanComputeContext.class.getClassLoader().getResourceAsStream(includePath)) {
+                    if (isInc != null) {
+                        String incSrc = new String(isInc.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+                        src = src.replace("#include \"stencil_constants.glsl\"", incSrc);
+                    } else {
+                        // If we can't find it in the classpath, we just leave it so compilation can fail with a more descriptive error.
+                        throw new IOException("Included file not found: " + includePath);
+                    }
+                }
+            }
+            return src;
         }
     }
 

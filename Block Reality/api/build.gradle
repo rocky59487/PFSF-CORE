@@ -48,6 +48,7 @@ minecraft {
             workingDirectory project.file('run')
             property 'forge.logging.console.level', 'debug'
             property 'blockreality.native.pfsf', 'true'
+            property 'org.lwjgl.system.stackSize', '512' // Allocate 512KB to avoid OutOfMemoryError during Vulkan initialization on Blackwell
             environment 'VK_ICD_FILENAMES', 'C:\\Windows\\System32\\DriverStore\\FileRepository\\nvami.inf_amd64_2c2a10115c2556ed\\nv-vk64.json'
             environment 'PATH', "C:\\VulkanSDK\\1.4.341.1\\Bin;" + System.getenv('PATH')
             mods { blockreality { source sourceSets.main } }
@@ -56,6 +57,7 @@ minecraft {
             workingDirectory project.file('run')
             property 'forge.logging.console.level', 'debug'
             property 'blockreality.native.pfsf', 'true'
+            property 'org.lwjgl.system.stackSize', '512' // Allocate 512KB to avoid OutOfMemoryError during Vulkan initialization on Blackwell
             environment 'VK_ICD_FILENAMES', 'C:\\Windows\\System32\\DriverStore\\FileRepository\\nvami.inf_amd64_2c2a10115c2556ed\\nv-vk64.json'
             environment 'PATH', "C:\\VulkanSDK\\1.4.341.1\\Bin;" + System.getenv('PATH')
             mods { blockreality { source sourceSets.main } }
