@@ -92,7 +92,6 @@ public class CollapseManager {
     // failure_scan kernel writes a flag. PFSF detects orphans on its
     // own via the phi_orphan threshold (φ > 1e6 when no anchor path
     // can drain the source) — no Java-side fallback.
-    }
 
     /**
      * 坍方佇列 — 超過每 tick 上限的方塊排入此佇列。
