@@ -23,7 +23,7 @@ class PFSFEngineIntegrationTest {
     }
 
     @Test
-    @DisplayName("native runtime counts as available")
+    @DisplayName("native runtime + Vulkan both required for availability")
     void testNativeRuntimeCountsAsAvailable() throws Exception {
         Field instanceField = PFSFEngine.class.getDeclaredField("instance");
         instanceField.setAccessible(true);
@@ -33,15 +33,28 @@ class PFSFEngineIntegrationTest {
         nativeActiveField.setAccessible(true);
         boolean previousNativeActive = nativeActiveField.getBoolean(null);
 
+        Field vkSupportedField = VulkanComputeContext.class.getDeclaredField("computeSupported");
+        vkSupportedField.setAccessible(true);
+        boolean previousVkSupported = vkSupportedField.getBoolean(null);
+
         try {
             instanceField.set(null, new PFSFEngineInstance());
             nativeActiveField.setBoolean(null, true);
 
+            // No-fallback contract: native alone is NOT enough — Vulkan must be live too.
+            vkSupportedField.setBoolean(null, true);
+
             assertTrue(PFSFEngine.isAvailable(),
-                    "Active native runtime must count as GPU availability");
+                    "Active native runtime + live Vulkan must count as GPU availability");
             assertSame(NativePFSFRuntime.asRuntime(), PFSFEngine.getRuntime(),
                     "Native runtime should be selected when it is active");
+
+            // Now drop Vulkan and prove native alone is rejected.
+            vkSupportedField.setBoolean(null, false);
+            assertFalse(PFSFEngine.isAvailable(),
+                    "Native runtime without Vulkan must NOT count as available (no-fallback contract)");
         } finally {
+            vkSupportedField.setBoolean(null, previousVkSupported);
             nativeActiveField.setBoolean(null, previousNativeActive);
             instanceField.set(null, previousInstance);
         }

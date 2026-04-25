@@ -44,6 +44,18 @@ public class BlockRealityMod {
     public static final String MOD_ID = "blockreality";
     private static final Logger LOGGER = LogManager.getLogger("BlockReality");
 
+    static {
+        // LWJGL MemoryStack 預設 64KB / thread。Blackwell + 近期 NVIDIA 驅動回報的
+        // device extension 數量會讓 new VkInstance(...) 內部的
+        // VkExtensionProperties.malloc(stack) 一次需要 ~80KB，必爆。
+        // 在 mod class 初始化時拉高，確保 server thread 首次取得 MemoryStack 時用 256KB。
+        // 若使用者透過 -Dorg.lwjgl.system.stackSize=N 設過更大，尊重該值。
+        Integer current = org.lwjgl.system.Configuration.STACK_SIZE.get();
+        if (current == null || current < 256) {
+            org.lwjgl.system.Configuration.STACK_SIZE.set(256);
+        }
+    }
+
     // ─── Creative Tab ───
     // Use ResourceLocation form to avoid NoSuchFieldError on Registries.CREATIVE_MODE_TAB
     // in production Forge (the Registries class field uses SRG names in the universal jar).
@@ -175,11 +187,15 @@ public class BlockRealityMod {
                 PFSFEngine.setFillRatioLookup(pos -> 1.0f); // 預設滿填充
                 LOGGER.info("[BlockReality] PFSF GPU 物理引擎已啟動");
             } else {
-                LOGGER.info("[BlockReality] PFSF 不可用（無 Vulkan），使用 CPU 物理引擎");
+                LOGGER.error("[BlockReality] ════════════════════════════════════════════");
+                LOGGER.error("[BlockReality] PFSF GPU 物理引擎不可用 — 物理計算不會執行");
+                LOGGER.error("[BlockReality] 此模組需要 Vulkan compute；請檢查 driver / GPU 支援");
+                LOGGER.error("[BlockReality] 並檢視 [PFSF-VulkanCtx] 訊息以取得失敗原因");
+                LOGGER.error("[BlockReality] ════════════════════════════════════════════");
             }
         } catch (Exception e) {
-            LOGGER.warn("[BlockReality] PFSF 初始化失敗（非致命），使用 CPU 物理引擎: {}",
-                    e.getMessage());
+            LOGGER.error("[BlockReality] PFSF 初始化拋例外 — 物理計算不會執行 ({}): {}",
+                    e.getClass().getSimpleName(), e.getMessage(), e);
         }
 
         

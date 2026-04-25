@@ -253,7 +253,14 @@ public final class NativePFSFRuntime {
 
         @Override public void init() { NativePFSFRuntime.init(); }
         @Override public void shutdown() { NativePFSFRuntime.shutdown(); }
-        @Override public boolean isAvailable() { return active && KERNELS_PORTED; }
+        // No-fallback contract: native runtime borrows Vulkan handles from
+        // VulkanComputeContext (see init() lines 147-152). Without Vulkan the
+        // C++ tick path is a no-op (pfsf_engine.cpp gates dispatch on
+        // descPool != VK_NULL_HANDLE), so reporting "available" would silently
+        // suppress all failure detection. Require Vulkan explicitly.
+        @Override public boolean isAvailable() {
+            return active && KERNELS_PORTED && VulkanComputeContext.isAvailable();
+        }
         @Override public String getStats() { return getStatus(); }
 
         @Override
